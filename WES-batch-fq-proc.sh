@@ -214,19 +214,6 @@ main() {
 export -f log get_s3_files trim_fastqs map_with_bwa
 main "${MANIFEST_FILE}" "${OUTPUT_DIR}" "${DRY_RUN}" "${JOBS}" "${S3_LOC}" "${S3_DEST}"
 
-# ### map
-# #ls |
-# cd /stereoseq/all_samples/normal/${TUM_ID}/;
-# echo `date "+%Y-%m-%d %H:%M:%S"` "SLX-${SLX_ID} BWA start" >> log.txt
-# file=$(echo $SLX_ID | cut -d '.' -f 1)
-# #echo ${file} | xargs -P 4 -I %% sh -c "aws s3 ls crm.sequencing.raw.data.sharing/batch1/SLX-%%/" | grep SLX-${SLX_ID} |
-# aws s3 ls s3://crm.steroseq.raw.data/Breast_CACRMY/all_samples/${TUM_ID}/normal_updatedFeb25/1_trim_galore_out/ | #grep SLX-${SLX_ID}. |
-# awk '{print $NF}' |
-# grep 'fq.gz$' | grep -v 0000 |
-# cut -d '.' -f 1,2,3,4 | 
-# sort | uniq | 
-# xargs -P 2 -I AAA sh -c  \
-
 
 # ## merge
 # echo `date "+%Y-%m-%d %H:%M:%S"` "SLX-${SLX_ID} MergeSamFiles start" >> log.txt
