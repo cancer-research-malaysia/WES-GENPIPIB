@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail # Bash strict mode
 
 # Function to display usage
 usage() {
@@ -23,6 +24,7 @@ OUTPUT_DIR=$(dirname "$0")
 JOBS=4
 
 S3_LOC="s3://crm.sequencing.raw.data.sharing/batch1/SLX"
+S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-TUM"
 
 # Parse command line arguments
 while getopts "hdo:j:" opt; do
@@ -48,6 +50,10 @@ done
 # Shift the parsed options
 shift $((OPTIND - 1))
 
+## After shift
+# echo "Number of remaining args: $#"
+# echo "Remaining args: $@"
+
 # Check required argument
 if [ $# -ne 1 ]; then
     echo "Error: Missing input manifest file." >&2
@@ -68,101 +74,109 @@ log() {
         *)       color="\033[0m"    ;; # Default
     esac
     echo -e "${color}[$(date '+%Y-%m-%d %H:%M:%S')] [${level}] $*\033[0m" >&2
+    exec 2>&2  # Force flush stderr
 }
 
-# Function to download files for a given file prefix
-download_from_s3() {
+# Function to get S3 URIs for a given SLX ID and prefix
+get_s3_files() {
     local slx_id=$1
-    local prefix=$2
-    local output_dir=$3
-    local dry_run=$4
-    local s3_loc=$5
+    local tum_id=$2
+    local file_prefix=$3
+    local s3_loc=$4
+    local s3_mapping=$5
 
-    if [ "$dry_run" = true ]; then
-        log "INFO" "DRY-RUN mode enabled. Showing what would be downloaded..."
-        aws s3 cp --dryrun "${s3_loc}-${slx_id}/${prefix}.r_1.fq.gz" ${output_dir}
-        aws s3 cp --dryrun "${s3_loc}-${slx_id}/${prefix}.r_2.fq.gz" ${output_dir}
-    else
-        log "INFO" "Downloading files for SLX-${slx_id} with prefix ${prefix}... to the specified output directory"
-        aws s3 cp "${s3_loc}-${SLX_ID}/${FILE_PREFIX}.r_1.fq.gz" ${output_dir}
-        aws s3 cp "${s3_loc}-${SLX_ID}/${FILE_PREFIX}.r_2.fq.gz" ${output_dir}
-    fi
+    
+    echo "Fetching file prefixes for SLX-${slx_id}..."
+    aws s3 ls "${s3_loc}-${slx_id}/" | \
+    grep "SLX-${file_prefix}\." | \
+    awk '{print $NF}' | \
+    grep 'fq.gz$' | \
+    grep -v 0000 | \
+    cut -d '.' -f 1,2,3,4 | \
+    sort | uniq | \
+    awk -v tid="$tum_id" -v slx="$slx_id" '{print slx ":" $0 ":" tid}' | \
+    tee -a "$s3_mapping"
 }
 
 # Function to trim FASTQ files using TrimGalore
-
-trim_fastq () {
+trim_fastqs () {
     local slx_id=$1
     local prefix=$2
-    local output_dir=$3
-    local dry_run=$4
-    local s3_loc=$5
+    local tum_id=$3
+    local output_dir=$4
+    local dry_run=$5
+    local s3_loc=$6
+    local s3_dest=$7
 
     if [ "$dry_run" = true ]; then
         log "INFO" "DRY-RUN mode enabled. Showing what would be run..."
-        
+        aws s3 cp --dryrun "${s3_loc}-${slx_id}/${prefix}.r_1.fq.gz" "${output_dir}/" && \
+        aws s3 cp --dryrun "${s3_loc}-${slx_id}/${prefix}.r_2.fq.gz" "${output_dir}/"
+        # echo "trim_galore ${prefix}.r_1.fq.gz ${prefix}.r_2.fq.gz --paired --gzip -o ${output_dir} -a CTGTCTCTTATACACATCT 2>${prefix}.trimgalore.log"
+        # echo "aws s3 cp ${prefix}.r_1_val_1.fq.gz ${s3_dest}/${tum_id}/1_trim_galore_out/" && \
+        # echo "aws s3 cp ${prefix}.r_2_val_2.fq.gz ${s3_dest}/${tum_id}/1_trim_galore_out/"
     else
-        log "INFO" "Trimming FASTQ files for SLX-${slx_id} with prefix ${prefix}..."
-        trim_galore AAA.r_1.fq.gz AAA.r_2.fq.gz --paired --gzip -o . -a CTGTCTCTTATACACATCT 2>AAA.log
-        aws s3 cp AAA.r_1_val_1.fq.gz s3://crm.steroseq.raw.data/Breast_CACRMY/all_samples/${TUM_ID}/normal_updatedFeb25/1_trim_galore_out/
-        aws s3 cp AAA.r_2_val_2.fq.gz s3://crm.steroseq.raw.data/Breast_CACRMY/all_samples/${TUM_ID}/normal_updatedFeb25/1_trim_galore_out/ && touch AAA.trim.success || touch AAA.trim.failed
+        log "INFO" "Trimming FASTQ files for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}..."
+        aws s3 cp "${s3_loc}-${slx_id}/${prefix}.r_1.fq.gz" "${output_dir}/" && \
+        aws s3 cp "${s3_loc}-${slx_id}/${prefix}.r_2.fq.gz" "${output_dir}/"
+        trim_galore "${prefix}.r_1.fq.gz" "${prefix}.r_2.fq.gz" --paired --gzip -o "${output_dir}" -a CTGTCTCTTATACACATCT 2>"logs/${prefix}.trimgalore.log"
+        aws s3 cp "${prefix}.r_1_val_1.fq.gz" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
+        aws s3 cp "${prefix}.r_2_val_2.fq.gz" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
+        touch "${prefix}.trim.success" || touch "${prefix}.trim.failed"
+
+        # Clean up
+        # check if trim.success file exists
+        if [ -f "${prefix}.trim.success" ]; then
+            rm "${prefix}.r_1.fq.gz" "${prefix}.r_2.fq.gz" "${prefix}.r_1_val_1.fq.gz" "${prefix}.r_2_val_2.fq.gz"
+            log "INFO" "TrimGalore completed successfully for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}."
+        else
+            log "ERROR" "TrimGalore failed for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}."
+            # write to trim.failed file
+            echo "TrimGalore failed for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}." > "${prefix}.trim.failed"
+        fi
     fi
 }
 
-main () {
+
+main() {
     local manifest=$1
     local output_dir=$2
     local dry_run=$3
     local jobs=$4
     local s3_loc=$5
-
-    export -f log download_from_s3 
-
-    # read in manifest file and process each line
-    tail -n +2 "${manifest}" | \
+    local s3_dest=$6
+    
+    local timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
+    local s3_mapping_file="${output_dir}/data-s3-mapping--${timestamp}.txt"
+    
+    
+    # Read the manifest file and get the S3 URIs for each SLX ID and save to a file
     while IFS=$'\t' read -r -a line; do
-        SLX_ID=${line[2]}
-        TUM_ID=${line[1]}
-        FILE_PREFIX=${line[0]}
-        log "INFO" "Processing SLX-${SLX_ID} of sample ${TUM_ID} (File: ${FILE_PREFIX})"
-        # List and filter S3 files
-        aws s3 ls "${s3_loc}-${SLX_ID}/" | \
-        # Filter for the SLX ID
-        grep "SLX-${FILE_PREFIX}\." | \
-        # Extract the last column in the listing output
-        awk '{print $NF}' | \
-        # Filter for FASTQ files
-        grep 'fq.gz$' | \
-        # Exclude files with 0000 in the name
-        grep -v 0000 | \
-        # Extract the first 4 fields separated by '.'
-        cut -d '.' -f 1,2,3,4 | \
-        # Sort and remove duplicates
-        sort | uniq | \
-        # catch the output using xargs
-        xargs -P ${jobs} -I AAA bash -c 'download_from_s3 ${SLX_ID} ${FILE_PREFIX} ${output_dir} ${dry_run} ${s3_loc}'
-        # download_from_s3 ${SLX_ID} ${FILE_PREFIX} ${output_dir} ${dry_run} ${s3_loc}
-    done
+        local slx_id=${line[2]}
+        local tum_id=${line[1]}
+        local file_prefix=${line[0]}
+
+        # echo "Processing SLX-${slx_id} of sample ${tum_id} (File: ${file_prefix})"
+
+        get_s3_files "$slx_id" "$tum_id" "$file_prefix" "$s3_loc" "${s3_mapping_file}" 
+    done < <(tail -n +2 "${manifest}")
+    
+    # check if the file prefixes file is empty
+    if [ "$(wc -l < "${s3_mapping_file}")" -eq 0 ]; then
+        log "ERROR" "S3 data mapping file is empty. No data stored at the target bucket? Exiting..."
+        exit 1
+    else
+        log "INFO" "S3 prefix file created successfully: ${s3_mapping_file}"
+        
+        ### Main workflow ###
+        parallel --colsep ':' -j "$jobs" --bar \
+        trim_fastqs {1} {2} {3} "${output_dir}" "$dry_run" "$s3_loc" "$s3_dest" :::: "${s3_mapping_file}"
+    fi
 }
 
-main "${MANIFEST_FILE}" "${OUTPUT_DIR}" "${DRY_RUN}" "${JOBS}" "${S3_LOC}"
-# echo `date "+%Y-%m-%d %H:%M:%S"` "SLX-${SLX_ID} TrimGalore on" >> log.txt
-# file=$(echo $SLX_ID | cut -d '.' -f 1)
-# echo ${file} | xargs -P 4 -I %% sh -c "aws s3 ls crm.sequencing.raw.data.sharing/batch1/SLX-%%/" | grep SLX-${SLX_ID}. |
-# awk '{print $NF}'|
-# grep 'fq.gz$' | grep -v 0000 |
-# cut -d '.' -f 1,2,3,4 | 
-# sort | uniq | 
-# xargs -P 2 -I AAA sh -c  \
-# " aws s3 cp s3://crm.sequencing.raw.data.sharing/batch1/SLX-${file}/AAA.r_1.fq.gz ./;
-# aws s3 cp s3://crm.sequencing.raw.data.sharing/batch1/SLX-${file}/AAA.r_2.fq.gz ./;
-# trim_galore AAA.r_1.fq.gz AAA.r_2.fq.gz --paired --gzip -o . -a CTGTCTCTTATACACATCT 2>AAA.log ; \
-# aws s3 cp AAA.r_1_val_1.fq.gz s3://crm.steroseq.raw.data/Breast_CACRMY/all_samples/${TUM_ID}/normal_updatedFeb25/1_trim_galore_out/ ; \
-# aws s3 cp AAA.r_2_val_2.fq.gz s3://crm.steroseq.raw.data/Breast_CACRMY/all_samples/${TUM_ID}/normal_updatedFeb25/1_trim_galore_out/ && touch AAA.trim.success || touch AAA.trim.failed ; \
-# rm AAA.*.fq.gz ; \
-# rm AAA.*.bam ; \
-# rm AAA.*.fq " ;
-# echo `date "+%Y-%m-%d %H:%M:%S"` "SLX-${SLX_ID} Trim Galore finish" >> log.txt
+# Run the main function
+export -f log get_s3_files trim_fastqs
+main "${MANIFEST_FILE}" "${OUTPUT_DIR}" "${DRY_RUN}" "${JOBS}" "${S3_LOC}" "${S3_DEST}"
 
 # ### map
 # #ls |
