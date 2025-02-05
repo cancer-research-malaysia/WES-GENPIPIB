@@ -112,9 +112,6 @@ trim_fastqs () {
         log "INFO" "DRY-RUN mode enabled. Showing what would be run..."
         aws s3 cp --dryrun "${s3_loc}-${slx_id}/${prefix}.r_1.fq.gz" "${output_dir}/" && \
         aws s3 cp --dryrun "${s3_loc}-${slx_id}/${prefix}.r_2.fq.gz" "${output_dir}/"
-        # echo "trim_galore ${prefix}.r_1.fq.gz ${prefix}.r_2.fq.gz --paired --gzip -o ${output_dir} -a CTGTCTCTTATACACATCT 2>${prefix}.trimgalore.log"
-        # echo "aws s3 cp ${prefix}.r_1_val_1.fq.gz ${s3_dest}/${tum_id}/1_trim_galore_out/" && \
-        # echo "aws s3 cp ${prefix}.r_2_val_2.fq.gz ${s3_dest}/${tum_id}/1_trim_galore_out/"
     else
         log "INFO" "Trimming FASTQ files for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}..."
         aws s3 cp "${s3_loc}-${slx_id}/${prefix}.r_1.fq.gz" "${output_dir}/" && \
@@ -137,6 +134,42 @@ trim_fastqs () {
     fi
 }
 
+# Function to map to reference genome using BWA
+map_with_bwa () {
+    local slx_id=$1
+    local prefix=$2
+    local tum_id=$3
+    local output_dir=$4
+    local dry_run=$5
+    local s3_loc=$6
+    local s3_dest=$7
+
+    # check dry run mode
+    if [ "$dry_run" = true ]; then
+        log "INFO" "DRY-RUN mode enabled. Showing what would be run..."
+        aws s3 cp --dryrun "${s3_dest}/${tum_id}/1_trim_galore_out/${prefix}.r_1.fq.gz" "${output_dir}/" && \
+        aws s3 cp --dryrun "${s3_dest}/${tum_id}/1_trim_galore_out/${prefix}.r_2.fq.gz" "${output_dir}/"
+    else
+        log "INFO" "Mapping to reference genome using BWA for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}..."
+        aws s3 cp "${s3_dest}/${tum_id}/1_trim_galore_out/${prefix}.r_1.fq.gz" "${output_dir}/" && \
+        aws s3 cp "${s3_dest}/${tum_id}/1_trim_galore_out/${prefix}.r_2.fq.gz" "${output_dir}/"
+        zcat "${output_dir}/${prefix}.r_1_val_1.fq.gz" | awk '(NR%2==0){\$0=substr(\$0,1,75)}{print}' > "${output_dir}/${prefix}_${tum_id}.r_1_bwa_in.fq" && \
+        zcat "${output_dir}/${prefix}.r_2_val_2.fq.gz" | awk '(NR%2==0){\$0=substr(\$0,1,75)}{print}' > "${output_dir}/${prefix}_${tum_id}.r_2_bwa_in.fq"
+        bwa mem -M -t 4 refs/GRCh38.109.bwa.fa "${output_dir}/${prefix}_${tum_id}.r_1_bwa_in.fq" "${output_dir}/${prefix}_${tum_id}.r_2_bwa_in.fq" 2>"${output_dir}/${prefix}.bwa.log" | \
+        samtools view --threads 8 -b - | \
+        samtools sort --threads 8 > "${output_dir}/${prefix}_${tum_id}.sorted.bam" && aws s3 cp "${output_dir}/${prefix}_${tum_id}.sorted.bam" "${s3_dest}/${tum_id}/2_bwa_out/" && \
+        touch "${prefix}.map.success" || touch "${prefix}.map.failed"
+    
+        # Clean up
+        if [ -f "${prefix}.map.success" ]; then
+            rm "${output_dir}/${prefix}_${tum_id}.r_1_bwa_in.fq" "${output_dir}/${prefix}_${tum_id}.r_2_bwa_in.fq"
+            log "INFO" "BWA mapping completed successfully for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}."
+        else
+            log "ERROR" "BWA mapping failed for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}."
+            # write to map.failed file
+            echo "BWA mapping failed for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}." > "${prefix}.map.failed"
+        fi
+}
 
 main() {
     local manifest=$1
@@ -168,14 +201,17 @@ main() {
     else
         log "INFO" "S3 prefix file created successfully: ${s3_mapping_file}"
         
-        ### Main workflow ###
+        ### MAIN WORKFLOW ###
         parallel --colsep ':' -j "$jobs" --bar \
         trim_fastqs {1} {2} {3} "${output_dir}" "$dry_run" "$s3_loc" "$s3_dest" :::: "${s3_mapping_file}"
+
+        parallel --colsep ':' -j "$jobs" --bar \
+        map_with_bwa {1} {2} {3} "${output_dir}" "$dry_run" "$s3_loc" "$s3_dest" :::: "${s3_mapping_file}"
     fi
 }
 
 # Run the main function
-export -f log get_s3_files trim_fastqs
+export -f log get_s3_files trim_fastqs map_with_bwa
 main "${MANIFEST_FILE}" "${OUTPUT_DIR}" "${DRY_RUN}" "${JOBS}" "${S3_LOC}" "${S3_DEST}"
 
 # ### map
@@ -190,19 +226,7 @@ main "${MANIFEST_FILE}" "${OUTPUT_DIR}" "${DRY_RUN}" "${JOBS}" "${S3_LOC}" "${S3
 # cut -d '.' -f 1,2,3,4 | 
 # sort | uniq | 
 # xargs -P 2 -I AAA sh -c  \
-# " aws s3 cp s3://crm.steroseq.raw.data/Breast_CACRMY/all_samples/${TUM_ID}/normal_updatedFeb25/1_trim_galore_out/AAA.r_1_val_1.fq.gz ./ ; \
-# aws s3 cp s3://crm.steroseq.raw.data/Breast_CACRMY/all_samples/${TUM_ID}/normal_updatedFeb25/1_trim_galore_out/AAA.r_2_val_2.fq.gz ./ ; \
-# zcat AAA.r_1_val_1.fq.gz | awk '(NR%2==0){\$0=substr(\$0,1,75)}{print}' > AAA.r_1_bwa_in.fq ; \
-# zcat AAA.r_2_val_2.fq.gz | awk '(NR%2==0){\$0=substr(\$0,1,75)}{print}' > AAA.r_2_bwa_in.fq ; \
-# bwa mem -M -t 4 /stereoseq/reference/GRCh38.109.bwa.fa \
-# AAA.r_1_bwa_in.fq \
-# AAA.r_2_bwa_in.fq 2>AAA.bwa.log | \
-# samtools view --threads 8 -b - | \
-# samtools sort --threads 8 > AAA.sorted.bam ; \
-# aws s3 cp AAA.bwa.log s3://crm.steroseq.raw.data/Breast_CACRMY/all_samples/${TUM_ID}/normal_updatedFeb25/2_bwa_out/ ; \
-# aws s3 cp AAA.sorted.bam s3://crm.steroseq.raw.data/Breast_CACRMY/all_samples/${TUM_ID}/normal_updatedFeb25/2_bwa_out/ && touch AAA.map.success || touch AAA.map.failed ; \
-# rm AAA.*.fq; " ;
-# echo `date "+%Y-%m-%d %H:%M:%S"` "SLX-${SLX_ID} BWA finish" >> log.txt
+
 
 # ## merge
 # echo `date "+%Y-%m-%d %H:%M:%S"` "SLX-${SLX_ID} MergeSamFiles start" >> log.txt
