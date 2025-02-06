@@ -21,6 +21,7 @@ EOF
 # Initialize variables
 DRY_RUN=false
 OUTPUT_DIR=$(dirname "$0")
+WORKING_DIR=$(dirname "$0")
 JOBS=4
 
 S3_LOC="s3://crm.sequencing.raw.data.sharing/batch1/SLX"
@@ -107,29 +108,31 @@ trim_fastqs () {
     local dry_run=$5
     local s3_loc=$6
     local s3_dest=$7
+    local working_dir=$8
 
     if [ "$dry_run" = true ]; then
-        log "INFO" "DRY-RUN mode enabled. Showing what would be run..."
+        log "INFO" "DRY-RUN mode enabled. We are at trimming step with TrimGalore..."
+        log "INFO" "Trimming FASTQ files for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}..."
         aws s3 cp --dryrun "${s3_loc}-${slx_id}/${prefix}.r_1.fq.gz" "${output_dir}/" && \
         aws s3 cp --dryrun "${s3_loc}-${slx_id}/${prefix}.r_2.fq.gz" "${output_dir}/"
     else
         log "INFO" "Trimming FASTQ files for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}..."
         aws s3 cp "${s3_loc}-${slx_id}/${prefix}.r_1.fq.gz" "${output_dir}/" && \
         aws s3 cp "${s3_loc}-${slx_id}/${prefix}.r_2.fq.gz" "${output_dir}/"
-        trim_galore "${prefix}.r_1.fq.gz" "${prefix}.r_2.fq.gz" --paired --gzip -o "${output_dir}" -a CTGTCTCTTATACACATCT 2>"logs/${prefix}.trimgalore.log"
-        aws s3 cp "${prefix}.r_1_val_1.fq.gz" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
-        aws s3 cp "${prefix}.r_2_val_2.fq.gz" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
-        touch "${prefix}.trim.success" || touch "${prefix}.trim.failed"
+        trim_galore "${output_dir}/${prefix}.r_1.fq.gz" "${output_dir}/${prefix}.r_2.fq.gz" --paired --gzip -o "${output_dir}" -a CTGTCTCTTATACACATCT 2>"${working_dir}/logs/${prefix}.trimgalore.log"
+        aws s3 cp "${output_dir}/${prefix}.r_1_val_1.fq.gz" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
+        aws s3 cp "${output_dir}/${prefix}.r_2_val_2.fq.gz" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
+        touch "${working_dir}/flagfiles/${prefix}.trim.success" || touch "${working_dir}/flagfiles/${prefix}.trim.failed"
 
         # Clean up
         # check if trim.success file exists
-        if [ -f "${prefix}.trim.success" ]; then
-            rm "${prefix}.r_1.fq.gz" "${prefix}.r_2.fq.gz" "${prefix}.r_1_val_1.fq.gz" "${prefix}.r_2_val_2.fq.gz"
+        if [ -f "${working_dir}/flagfiles/${prefix}.trim.success" ]; then
+            rm "${output_dir}/${prefix}.r_1.fq.gz" "${output_dir}/${prefix}.r_2.fq.gz"
             log "INFO" "TrimGalore completed successfully for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}."
         else
             log "ERROR" "TrimGalore failed for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}."
             # write to trim.failed file
-            echo "TrimGalore failed for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}." > "${prefix}.trim.failed"
+            echo "TrimGalore failed for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}." > "${working_dir}/flagfiles/${prefix}.trim.failed"
         fi
     fi
 }
@@ -143,32 +146,33 @@ map_with_bwa () {
     local dry_run=$5
     local s3_loc=$6
     local s3_dest=$7
+    local working_dir=$8
 
     # check dry run mode
     if [ "$dry_run" = true ]; then
-        log "INFO" "DRY-RUN mode enabled. Showing what would be run..."
-        aws s3 cp --dryrun "${s3_dest}/${tum_id}/1_trim_galore_out/${prefix}.r_1.fq.gz" "${output_dir}/" && \
-        aws s3 cp --dryrun "${s3_dest}/${tum_id}/1_trim_galore_out/${prefix}.r_2.fq.gz" "${output_dir}/"
+        log "INFO" "DRY-RUN mode enabled. We are at mapping step with BWA..."
+        log "INFO" "Mapping to reference genome using BWA for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}..."
+        echo "aws s3 cp --dryrun ${s3_dest}/${tum_id}/1_trim_galore_out/${prefix}.r_1.fq.gz ${output_dir}/" && \
+        echo "aws s3 cp --dryrun ${s3_dest}/${tum_id}/1_trim_galore_out/${prefix}.r_2.fq.gz ${output_dir}/"
     else
         log "INFO" "Mapping to reference genome using BWA for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}..."
-        aws s3 cp "${s3_dest}/${tum_id}/1_trim_galore_out/${prefix}.r_1.fq.gz" "${output_dir}/" && \
-        aws s3 cp "${s3_dest}/${tum_id}/1_trim_galore_out/${prefix}.r_2.fq.gz" "${output_dir}/"
         zcat "${output_dir}/${prefix}.r_1_val_1.fq.gz" | awk '(NR%2==0){\$0=substr(\$0,1,75)}{print}' > "${output_dir}/${prefix}_${tum_id}.r_1_bwa_in.fq" && \
         zcat "${output_dir}/${prefix}.r_2_val_2.fq.gz" | awk '(NR%2==0){\$0=substr(\$0,1,75)}{print}' > "${output_dir}/${prefix}_${tum_id}.r_2_bwa_in.fq"
-        bwa mem -M -t 4 refs/GRCh38.109.bwa.fa "${output_dir}/${prefix}_${tum_id}.r_1_bwa_in.fq" "${output_dir}/${prefix}_${tum_id}.r_2_bwa_in.fq" 2>"${output_dir}/${prefix}.bwa.log" | \
+        bwa mem -M -t 4 "${working_dir}/refs/GRCh38.109.fa" "${output_dir}/${prefix}_${tum_id}.r_1_bwa_in.fq" "${output_dir}/${prefix}_${tum_id}.r_2_bwa_in.fq" 2>"${working_dir}/logs/${prefix}.bwa.log" | \
         samtools view --threads 8 -b - | \
         samtools sort --threads 8 > "${output_dir}/${prefix}_${tum_id}.sorted.bam" && aws s3 cp "${output_dir}/${prefix}_${tum_id}.sorted.bam" "${s3_dest}/${tum_id}/2_bwa_out/" && \
-        touch "${prefix}.map.success" || touch "${prefix}.map.failed"
+        touch "${working_dir}/flagfiles/${prefix}.map.success" || touch "${working_dir}/flagfiles/${prefix}.map.failed"
     
         # Clean up
-        if [ -f "${prefix}.map.success" ]; then
+        if [ -f "${working_dir}/flagfiles/${prefix}.map.success" ]; then
             rm "${output_dir}/${prefix}_${tum_id}.r_1_bwa_in.fq" "${output_dir}/${prefix}_${tum_id}.r_2_bwa_in.fq"
             log "INFO" "BWA mapping completed successfully for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}."
         else
             log "ERROR" "BWA mapping failed for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}."
             # write to map.failed file
-            echo "BWA mapping failed for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}." > "${prefix}.map.failed"
+            echo "BWA mapping failed for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}." > "${working_dir}/flagfiles/${prefix}.map.failed"
         fi
+    fi
 }
 
 main() {
@@ -178,6 +182,7 @@ main() {
     local jobs=$4
     local s3_loc=$5
     local s3_dest=$6
+    local working_dir=$7
     
     local timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
     local s3_mapping_file="${output_dir}/data-s3-mapping--${timestamp}.txt"
@@ -202,17 +207,29 @@ main() {
         log "INFO" "S3 prefix file created successfully: ${s3_mapping_file}"
         
         ### MAIN WORKFLOW ###
+        ## Trim FASTQs
         parallel --colsep ':' -j "$jobs" --bar \
-        trim_fastqs {1} {2} {3} "${output_dir}" "$dry_run" "$s3_loc" "$s3_dest" :::: "${s3_mapping_file}"
+        trim_fastqs {1} {2} {3} "${output_dir}" "${dry_run}" "${s3_loc}" "${s3_dest}" "${working_dir}" :::: "${s3_mapping_file}" && \
+            touch "${working_dir}/flagfiles/ALL-trim.success" || touch "${working_dir}/flagfiles/ALL-trim.failed"
 
-        parallel --colsep ':' -j "$jobs" --bar \
-        map_with_bwa {1} {2} {3} "${output_dir}" "$dry_run" "$s3_loc" "$s3_dest" :::: "${s3_mapping_file}"
+        # check for all-trim.success file
+        if [ -f "${working_dir}/flagfiles/ALL-trim.success" ]; then
+            log "INFO" "Trimming completed successfully for all samples."
+            ## Map with BWA
+            parallel --colsep ':' -j "$jobs" --bar \
+                map_with_bwa {1} {2} {3} "${output_dir}" "${output_dir}" "${dry_run}" "${s3_loc}" "${s3_dest}" "${working_dir}" :::: "${s3_mapping_file}" && \
+                    touch "${working_dir}/flagfiles/ALL-map.success" || touch "${working_dir}/flagfiles/ALL-map.failed"
+        else
+            log "ERROR" "Trimming failed for some samples. Check the logs for details."
+            exit 1
+        fi
+        
     fi
 }
 
 # Run the main function
 export -f log get_s3_files trim_fastqs map_with_bwa
-main "${MANIFEST_FILE}" "${OUTPUT_DIR}" "${DRY_RUN}" "${JOBS}" "${S3_LOC}" "${S3_DEST}"
+main "${MANIFEST_FILE}" "${OUTPUT_DIR}" "${DRY_RUN}" "${JOBS}" "${S3_LOC}" "${S3_DEST}" "${WORKING_DIR}"
 
 
 # ## merge
