@@ -21,7 +21,7 @@ EOF
 # Initialize variables
 DRY_RUN=false
 OUTPUT_DIR=$(dirname "$0")
-WORKING_DIR=$(dirname "$0")
+WORKING_DIR=$(pwd)
 JOBS=4
 
 S3_LOC="s3://crm.sequencing.raw.data.sharing/batch1/SLX"
@@ -100,7 +100,7 @@ get_s3_files() {
 }
 
 # Function to trim FASTQ files using TrimGalore
-trim_fastqs () {
+trim_fastqs() {
     local slx_id=$1
     local prefix=$2
     local tum_id=$3
@@ -138,7 +138,7 @@ trim_fastqs () {
 }
 
 # Function to map to reference genome using BWA
-map_with_bwa () {
+map_with_bwa() {
     local slx_id=$1
     local prefix=$2
     local tum_id=$3
@@ -156,8 +156,8 @@ map_with_bwa () {
         echo "aws s3 cp --dryrun ${s3_dest}/${tum_id}/1_trim_galore_out/${prefix}.r_2.fq.gz ${output_dir}/"
     else
         log "INFO" "Mapping to reference genome using BWA for SLX-${slx_id} of sample ${tum_id} with prefix ${prefix}..."
-        zcat "${output_dir}/${prefix}.r_1_val_1.fq.gz" | awk '(NR%2==0){\$0=substr(\$0,1,75)}{print}' > "${output_dir}/${prefix}_${tum_id}.r_1_bwa_in.fq" && \
-        zcat "${output_dir}/${prefix}.r_2_val_2.fq.gz" | awk '(NR%2==0){\$0=substr(\$0,1,75)}{print}' > "${output_dir}/${prefix}_${tum_id}.r_2_bwa_in.fq"
+        zcat "${output_dir}/${prefix}.r_1_val_1.fq.gz" | awk '(NR%2==0){$0=substr($0,1,75)}{print}' > "${output_dir}/${prefix}_${tum_id}.r_1_bwa_in.fq" && \
+        zcat "${output_dir}/${prefix}.r_2_val_2.fq.gz" | awk '(NR%2==0){$0=substr($0,1,75)}{print}' > "${output_dir}/${prefix}_${tum_id}.r_2_bwa_in.fq"
         bwa mem -M -t 4 "${working_dir}/refs/GRCh38.109.fa" "${output_dir}/${prefix}_${tum_id}.r_1_bwa_in.fq" "${output_dir}/${prefix}_${tum_id}.r_2_bwa_in.fq" 2>"${working_dir}/logs/${prefix}.bwa.log" | \
         samtools view --threads 8 -b - | \
         samtools sort --threads 8 > "${output_dir}/${prefix}_${tum_id}.sorted.bam" && aws s3 cp "${output_dir}/${prefix}_${tum_id}.sorted.bam" "${s3_dest}/${tum_id}/2_bwa_out/" && \
@@ -175,6 +175,32 @@ map_with_bwa () {
     fi
 }
 
+# Function to merge BAM files
+merge_bams() {
+    local slx_id=$1
+    local tum_id=$2
+    local output_dir=$3
+    local dry_run=$4
+    local s3_dest=$5
+    local working_dir=$6
+
+    # check dry run mode
+    if [ "$dry_run" = true ]; then
+        log "INFO" "DRY-RUN mode enabled. We are at merging step with MergeSamFiles..."
+        log "INFO" "Merging BAM files from sample ${tum_id}..."
+        aws s3 ls "${s3_dest}/${tum_id}/2_bwa_out/" | grep "SLX-${slx_id}." | grep ".sorted.bam$" | awk '{print $NF}' | while read l; do echo \"-I \"\$l; done >> "${working_dir}/manifests/${tum_id}_bams.list"
+        gatk MergeSamFiles --USE_THREADING true \
+        --arguments_file "${working_dir}/manifests/${tum_id}_bams.list" \
+        -O "${output_dir}/${tum_id}.merged.bam" && \
+        samtools index "${output_dir}/${tum_id}.merged.bam" "${output_dir}/${tum_id}.merged.bai"
+
+        # transfer to S3
+        aws s3 cp "${output_dir}/${tum_id}.merged.bam" "${s3_dest}/${tum_id}/3_merged_bams/" && \
+        aws s3 cp "${output_dir}/${tum_id}.merged.bai" "${s3_dest}/${tum_id}/3_merged_bams/"
+    fi
+}
+
+
 main() {
     local manifest=$1
     local output_dir=$2
@@ -185,8 +211,8 @@ main() {
     local working_dir=$7
     
     local timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
-    local s3_mapping_file="${output_dir}/data-s3-mapping--${timestamp}.txt"
-    
+    local s3_mapping_file="${working_dir}/manifests/data-s3-mapping--${timestamp}.txt"
+    local s3_idpairs_file="${working_dir}/manifests/data-s3-IDpairs--${timestamp}.txt"
     
     # Read the manifest file and get the S3 URIs for each SLX ID and save to a file
     while IFS=$'\t' read -r -a line; do
@@ -206,9 +232,12 @@ main() {
     else
         log "INFO" "S3 prefix file created successfully: ${s3_mapping_file}"
         
+        # create slx-id:tum-id unique list
+        awk -F':' '{print $1":"$3}' ${s3_mapping_file} | uniq > ${s3_idpairs_file}
+
         ### MAIN WORKFLOW ###
         ## Trim FASTQs
-        parallel --colsep ':' -j "$jobs" --bar \
+        parallel --colsep ':' -j "$jobs" \
         trim_fastqs {1} {2} {3} "${output_dir}" "${dry_run}" "${s3_loc}" "${s3_dest}" "${working_dir}" :::: "${s3_mapping_file}" && \
             touch "${working_dir}/flagfiles/ALL-trim.success" || touch "${working_dir}/flagfiles/ALL-trim.failed"
 
@@ -216,9 +245,30 @@ main() {
         if [ -f "${working_dir}/flagfiles/ALL-trim.success" ]; then
             log "INFO" "Trimming completed successfully for all samples."
             ## Map with BWA
-            parallel --colsep ':' -j "$jobs" --bar \
-                map_with_bwa {1} {2} {3} "${output_dir}" "${output_dir}" "${dry_run}" "${s3_loc}" "${s3_dest}" "${working_dir}" :::: "${s3_mapping_file}" && \
+            parallel --colsep ':' -j "$jobs" \
+                map_with_bwa {1} {2} {3} "${output_dir}" "${dry_run}" "${s3_loc}" "${s3_dest}" "${working_dir}" :::: "${s3_mapping_file}" && \
                     touch "${working_dir}/flagfiles/ALL-map.success" || touch "${working_dir}/flagfiles/ALL-map.failed"
+            
+            # check for all-map.success file
+            if [ -f "${working_dir}/flagfiles/ALL-map.success" ]; then
+                log "INFO" "Mapping completed successfully for all samples."
+                ## Merge BAM files
+                parallel --colsep ':' -j "$jobs" \
+                    merge_bams {1} {2} "${output_dir}" "${dry_run}" "${s3_dest}" "${working_dir}" :::: "${s3_idpairs_file}" && \
+                        touch "${working_dir}/flagfiles/ALL-merge.success" || touch "${working_dir}/flagfiles/ALL-merge.failed"
+                
+                # check for all-merge.success file
+                if [ -f "${working_dir}/flagfiles/ALL-merge.success" ]; then
+                    log "INFO" "Merging completed successfully for all samples."
+                    
+                else
+                    log "ERROR" "Merging failed for some samples. Check the logs for details."
+                    exit 1
+                fi
+            else
+                log "ERROR" "Mapping failed for some samples. Check the logs for details."
+                exit 1
+            fi
         else
             log "ERROR" "Trimming failed for some samples. Check the logs for details."
             exit 1
@@ -228,24 +278,17 @@ main() {
 }
 
 # Run the main function
-export -f log get_s3_files trim_fastqs map_with_bwa
+export -f \
+    log \
+    get_s3_files \
+    trim_fastqs \
+    map_with_bwa \
+    merge_bams
+
+## debug line
+#echo "main ${MANIFEST_FILE} ${OUTPUT_DIR} ${DRY_RUN} ${JOBS} ${S3_LOC} ${S3_DEST} ${WORKING_DIR}"
+
 main "${MANIFEST_FILE}" "${OUTPUT_DIR}" "${DRY_RUN}" "${JOBS}" "${S3_LOC}" "${S3_DEST}" "${WORKING_DIR}"
-
-
-# ## merge
-# echo `date "+%Y-%m-%d %H:%M:%S"` "SLX-${SLX_ID} MergeSamFiles start" >> log.txt
-# cd /stereoseq/all_samples/normal/${TUM_ID}/;
-# aws s3 ls crm.steroseq.raw.data/Breast_CACRMY/all_samples/${TUM_ID}/normal_updatedFeb25/2_bwa_out/ | grep SLX-${SLX_ID}. |
-# grep .sorted.bam$ | awk '{print $NF}'| while read l; do
-#     echo "-I "$l
-# done > ${TUM_ID}_normal_bams.list
-# /home/ubuntu/tools/gatk-4.4.0.0/gatk MergeSamFiles --USE_THREADING true \
-# --arguments_file ${TUM_ID}_normal_bams.list \
-# -O ${TUM_ID}.normal.merged.bam
-# samtools index ${TUM_ID}.normal.merged.bam ${TUM_ID}.normal.merged.bai;
-# aws s3 cp ${TUM_ID}.normal.merged.bam s3://crm.steroseq.raw.data/Breast_CACRMY/all_samples/${TUM_ID}/normal_updatedFeb25/3_merged_bams/; 
-# aws s3 cp ${TUM_ID}.normal.merged.bai s3://crm.steroseq.raw.data/Breast_CACRMY/all_samples/${TUM_ID}/normal_updatedFeb25/3_merged_bams/;
-# echo `date "+%Y-%m-%d %H:%M:%S"` "SLX-${SLX_ID} MergeSamFiles finish" >> log.txt
 
 # ### add read groups
 # #ls |
