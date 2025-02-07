@@ -27,6 +27,9 @@ JOBS=4
 S3_LOC="s3://crm.sequencing.raw.data.sharing/batch1/SLX"
 S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-TUM"
 
+# generate a ID for the run
+RUN_ID=$(head -c 8 /dev/urandom | xxd -p)
+
 # Parse command line arguments
 while getopts "hdo:j:" opt; do
     case $opt in
@@ -50,14 +53,21 @@ MANIFEST_FILE=$1
 # Logging function
 log() {
     local level=$1
-    shift
+    local workdir=$2
+    local run_id=$3
+    shift 3
     local color="\033[0m"
     case "$level" in
         "INFO")  color="\033[0;32m" ;;
         "WARN")  color="\033[0;33m" ;;
         "ERROR") color="\033[0;31m" ;;
     esac
-    echo -e "${color}[$(date '+%Y-%m-%d %H:%M:%S')] [${level}] $*\033[0m" >&2
+    # Create the log message with timestamp
+    local log_message="[$(date '+%Y-%m-%d %H:%M:%S')] [${level}] $*"
+    # Output colored version to terminal
+    echo -e "${color}${log_message}\033[0m" >&2
+    # Output non-colored version to log file
+    echo "${log_message}" >> "${workdir}/logs/${run_id}-pipeline-$(date '+%Y-%m-%d').log"
 }
 
 # Checkpoint management functions
@@ -66,12 +76,13 @@ create_checkpoint() {
     local identifier=$2
     local workdir=$3
     local dry_run=$4
+    local run_id=$5
 
     if [ "$dry_run" = false ]; then
-        touch "${workdir}/flagfiles/${identifier}.${stage}.success"
-        log "INFO" "Created checkpoint for ${stage}:${identifier}"
+        touch "${workdir}/flagfiles/${run_id}.${identifier}.${stage}.success"
+        log "INFO" "${workdir}" "${run_id}" "Created checkpoint for ${run_id}:${stage}:${identifier}"
     else
-        log "INFO" "DRY-RUN: Would create checkpoint for ${stage}:${identifier}"
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create checkpoint for ${run_id}:${stage}:${identifier}"
     fi
 }
 
@@ -80,9 +91,10 @@ check_checkpoint() {
     local identifier=$2
     local workdir=$3
     local dry_run=$4
+    local run_id=$5
 
     if [ "$dry_run" = false ]; then
-        [ -f "${workdir}/flagfiles/${identifier}.${stage}.success" ]
+        [ -f "${workdir}/flagfiles/${run_id}.${identifier}.${stage}.success" ]
     else
         # In dry-run mode, always return false to ensure all steps would be executed
         return 1
@@ -95,12 +107,13 @@ mark_failure() {
     local workdir=$3
     local dry_run=$4
     local message=$5
+    local run_id=$6
 
     if [ "$dry_run" = false ]; then
-        echo "$message" > "${workdir}/flagfiles/${identifier}.${stage}.failed"
-        log "ERROR" "$message"
+        echo "$message" > "${workdir}/flagfiles/${run_id}.${identifier}.${stage}.failed"
+        log "ERROR" "${workdir}" "${run_id}" "$message"
     else
-        log "ERROR" "DRY-RUN: Would mark failure for ${stage}:${identifier} - $message"
+        log "ERROR" "${workdir}" "${run_id}" "DRY-RUN: Would mark failure for ${run_id}:${stage}:${identifier} - $message"
     fi
     return 1
 }
