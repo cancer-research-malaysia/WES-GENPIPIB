@@ -229,7 +229,7 @@ process_mapping() {
         awk '(NR%2==0){$0=substr($0,1,75)}{print}' > "${outdir}/${prefix}_${tum_id}.r_1_bwa_in.fq" && \
     zcat "${outdir}/${prefix}.r_2_val_2.fq.gz" | \
         awk '(NR%2==0){$0=substr($0,1,75)}{print}' > "${outdir}/${prefix}_${tum_id}.r_2_bwa_in.fq" && \
-    bwa mem -M -t 4 ${workdir}/refs/GRCh38.109.bwa \
+    bwa mem -M -t 4 refs/GRCh38-109_bwa_db \
         "${outdir}/${prefix}_${tum_id}.r_1_bwa_in.fq" \
         "${outdir}/${prefix}_${tum_id}.r_2_bwa_in.fq" \
         2>"${workdir}/logs/${prefix}.bwa.log" | \
