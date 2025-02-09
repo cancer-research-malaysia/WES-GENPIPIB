@@ -22,7 +22,7 @@ EOF
 DRY_RUN=false
 OUTPUT_DIR=$(dirname "$0")
 WORKING_DIR=$(pwd)
-JOBS=4
+JOBS=3
 
 S3_LOC="s3://crm.sequencing.raw.data.sharing/batch1/SLX"
 S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-TUM"
@@ -79,7 +79,7 @@ create_checkpoint() {
     local run_id=$5
 
     if [ "$dry_run" = false ]; then
-        touch "${workdir}/flagfiles/${run_id}.${identifier}.${stage}.success"
+        touch "${workdir}/flagfiles/${run_id}/${run_id}.${identifier}.${stage}.success"
         log "INFO" "${workdir}" "${run_id}" "Created checkpoint for ${run_id}:${stage}:${identifier}"
     else
         log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create checkpoint for ${run_id}:${stage}:${identifier}"
@@ -94,7 +94,7 @@ check_checkpoint() {
     local run_id=$5
 
     if [ "$dry_run" = false ]; then
-        [ -f "${workdir}/flagfiles/${run_id}.${identifier}.${stage}.success" ]
+        [ -f "${workdir}/flagfiles/${run_id}/${run_id}.${identifier}.${stage}.success" ]
     else
         # In dry-run mode, always return false to ensure all steps would be executed
         return 1
@@ -110,7 +110,7 @@ mark_failure() {
     local run_id=$6
 
     if [ "$dry_run" = false ]; then
-        echo "$message" > "${workdir}/flagfiles/${run_id}.${identifier}.${stage}.failed"
+        echo "$message" > "${workdir}/flagfiles/${run_id}/${run_id}.${identifier}.${stage}.failed"
         log "ERROR" "${workdir}" "${run_id}" "$message"
     else
         log "ERROR" "${workdir}" "${run_id}" "DRY-RUN: Would mark failure for ${run_id}:${stage}:${identifier} - $message"
@@ -122,12 +122,13 @@ mark_failure() {
 init_checkpoints() {
     local workdir=$1
     local dry_run=$2
+    local run_id=$3
 
     if [ "$dry_run" = false ]; then
-        mkdir -p "${workdir}/flagfiles"
-        log "INFO" "Initialized checkpoint directory"
+        mkdir -p "${workdir}/flagfiles/${run_id}"
+        log "INFO" "${workdir}" "${run_id}" "Initialized checkpoint directory"
     else
-        log "INFO" "DRY-RUN: Would create checkpoint directory at ${workdir}/flagfiles"
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create checkpoint directory at ${workdir}/flagfiles/${run_id}"
     fi
 }
 
@@ -159,20 +160,21 @@ process_trimming() {
     local prefix=$2
     local tum_id=$3
     local dry_run=$4
-    local outdir=$5
-    local workdir=$6
-    local s3_loc=$7
-    local s3_dest=$8
+    local run_id=$5
+    local outdir=$6
+    local workdir=$7
+    local s3_loc=$8
+    local s3_dest=$9
     
-    if check_checkpoint "trim" "${prefix}" "${workdir}" "$dry_run"; then
-        log "INFO" "Skipping trimming for ${prefix} - already completed"
+    if check_checkpoint "trim" "${prefix}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "INFO" "${workdir}" "${run_id}" "Skipping trimming for ${prefix} - already completed"
         return 0
     fi
 
-    log "INFO" "Trimming FASTQ files for SLX-${slx_id} of sample ${tum_id}..."
+    log "INFO" "${workdir}" "${run_id}" "Trimming FASTQ files for SLX-${slx_id} of sample ${tum_id}..."
 
     if [ "$dry_run" = true ]; then
-        log "INFO" "DRY-RUN mode enabled!"
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN mode enabled!"
         aws s3 cp --dryrun "${s3_loc}-${slx_id}/${prefix}.r_1.fq.gz" "${outdir}/"
         aws s3 cp --dryrun "${s3_loc}-${slx_id}/${prefix}.r_2.fq.gz" "${outdir}/"
         return 0
@@ -186,13 +188,13 @@ process_trimming() {
         2>"${workdir}/logs/${prefix}.trimgalore.log" && \
     aws s3 cp "${outdir}/${prefix}.r_1_val_1.fq.gz" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
     aws s3 cp "${outdir}/${prefix}.r_2_val_2.fq.gz" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
-    create_checkpoint "trim" "${prefix}" "${workdir}" "$dry_run" || \
-    mark_failure "trim" "${prefix}" "${workdir}" "$dry_run" "TrimGalore failed for SLX-${slx_id} of sample ${tum_id}"
+    create_checkpoint "trim" "${prefix}" "${workdir}" "${dry_run}" "${run_id}" || \
+    mark_failure "trim" "${prefix}" "${workdir}" "${dry_run}" "TrimGalore failed for SLX-${slx_id} of sample ${tum_id}" "${run_id}"
 
     # Cleanup on success
-    if check_checkpoint "trim" "${prefix}" "${workdir}" "$dry_run"; then
+    if check_checkpoint "trim" "${prefix}" "${workdir}" "${dry_run}" "${run_id}"; then
         rm "${outdir}/${prefix}.r_1.fq.gz" "${outdir}/${prefix}.r_2.fq.gz"
-        log "INFO" "TrimGalore completed successfully for ${prefix}"
+        log "INFO" "${workdir}" "${run_id}" "TrimGalore completed successfully for ${prefix}"
     fi
 }
 
@@ -201,57 +203,59 @@ process_mapping() {
     local prefix=$2
     local tum_id=$3
     local dry_run=$4
-    local outdir=$5
-    local workdir=$6
-    local s3_dest=$7
+    local run_id=$5
+    local outdir=$6
+    local workdir=$7
+    local s3_dest=$8
     
     if [ "$dry_run" = true ]; then
-        log "INFO" "DRY-RUN enabled: Would map ${prefix}"
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN enabled: Would map ${prefix}"
         return 0
     fi
     
-    if ! check_checkpoint "trim" "${prefix}" "${workdir}" "$dry_run"; then
-        log "ERROR" "Cannot proceed with mapping - trimming not completed for ${prefix}"
+    if ! check_checkpoint "trim" "${prefix}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "ERROR" "${workdir}" "${run_id}" "Cannot proceed with mapping - trimming not completed for ${prefix}"
         return 1
     fi
 
-    if check_checkpoint "map" "${prefix}" "${workdir}" "$dry_run"; then
-        log "INFO" "Skipping mapping for ${prefix} - already completed"
+    if check_checkpoint "map" "${prefix}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "INFO" "${workdir}" "${run_id}" "Skipping mapping for ${prefix} - already completed"
         return 0
     fi
 
-    log "INFO" "Mapping ${prefix} to reference genome..."
+    log "INFO" "${workdir}" "${run_id}" "Mapping ${prefix} to reference genome..."
     
     zcat "${outdir}/${prefix}.r_1_val_1.fq.gz" | \
         awk '(NR%2==0){$0=substr($0,1,75)}{print}' > "${outdir}/${prefix}_${tum_id}.r_1_bwa_in.fq" && \
     zcat "${outdir}/${prefix}.r_2_val_2.fq.gz" | \
         awk '(NR%2==0){$0=substr($0,1,75)}{print}' > "${outdir}/${prefix}_${tum_id}.r_2_bwa_in.fq" && \
-    bwa mem -M -t 4 "${workdir}/refs/GRCh38.109.fa" \
+    bwa mem -M -t 4 ${workdir}/refs/GRCh38.109.bwa \
         "${outdir}/${prefix}_${tum_id}.r_1_bwa_in.fq" \
         "${outdir}/${prefix}_${tum_id}.r_2_bwa_in.fq" \
         2>"${workdir}/logs/${prefix}.bwa.log" | \
     samtools view --threads 8 -b - | \
     samtools sort --threads 8 > "${outdir}/${prefix}_${tum_id}.sorted.bam" && \
     aws s3 cp "${outdir}/${prefix}_${tum_id}.sorted.bam" "${s3_dest}/${tum_id}/2_bwa_out/" && \
-    create_checkpoint "map" "${prefix}_${tum_id}" "${workdir}" "$dry_run" || \
-    mark_failure "map" "${prefix}_${tum_id}" "${workdir}" "$dry_run" "BWA mapping failed for ${prefix}_${tum_id}"
+    create_checkpoint "map" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
+    mark_failure "map" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "BWA mapping failed for ${prefix}_${tum_id}" "${run_id}"
 
     # Cleanup on success
-    if check_checkpoint "map" "${prefix}_${tum_id}" "${workdir}" "$dry_run"; then
+    if check_checkpoint "map" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         rm "${outdir}/${prefix}_${tum_id}.r_1_bwa_in.fq" "${outdir}/${prefix}_${tum_id}.r_2_bwa_in.fq"
-        log "INFO" "BWA mapping completed successfully for ${prefix}_${tum_id}"
+        log "INFO" "${workdir}" "${run_id}" "BWA mapping completed successfully for ${prefix}_${tum_id}"
     fi
 }
 
 process_bamlisting() {
     local tum_id=$1
     local dry_run=$2
-    local outdir=$3
-    local workdir=$4
-    local s3_dest=$5
+    local run_id=$3
+    local outdir=$4
+    local workdir=$5
+    local s3_dest=$6
     
     if [ "$dry_run" = true ]; then
-        log "INFO" "DRY-RUN: Would create ${tum_id} bamlist"
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create ${tum_id} bamlist"
         return 0
     fi
     
@@ -260,12 +264,12 @@ process_bamlisting() {
     #     return 1
     # fi
 
-    if check_checkpoint "bamlist" "${tum_id}" "${workdir}" "$dry_run"; then
-        log "INFO" "Skipping bamlisting for ${tum_id} - already completed"
+    if check_checkpoint "bamlist" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "INFO" "${workdir}" "${run_id}" "Skipping bamlisting for ${tum_id} - already completed"
         return 0
     fi
 
-    log "INFO" "Listing BAM files for sample ${tum_id}..."
+    log "INFO" "${workdir}" "${run_id}" "Listing BAM files for sample ${tum_id}..."
     
     local bam_list="${workdir}/manifests/${tum_id}_bams.list"
     
@@ -276,39 +280,40 @@ process_bamlisting() {
             echo "-I $l"
         done >> "$bam_list"
     
-    create_checkpoint "bamlist" "${tum_id}" "${workdir}" "$dry_run" || \
-    mark_failure "bamlist" "${tum_id}" "${workdir}" "$dry_run" "Bamlisting failed for sample ${tum_id}"
+    create_checkpoint "bamlist" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
+    mark_failure "bamlist" "${tum_id}" "${workdir}" "${dry_run}" "Bamlisting failed for sample ${tum_id}" "${run_id}"
 }
 
 process_merging() {
     local tum_id=$1
     local dry_run=$2
-    local outdir=$3
-    local workdir=$4
-    local s3_dest=$5
+    local run_id=$3
+    local outdir=$4
+    local workdir=$5
+    local s3_dest=$6
 
     if [ "$dry_run" = true ]; then
-        log "INFO" "DRY-RUN: Would merge BAMs for sample ${tum_id}"
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would merge BAMs for sample ${tum_id}"
         return 0
     fi
     
-    if ! check_checkpoint "bamlist" "${tum_id}" "${workdir}" "$dry_run"; then
-        log "ERROR" "Cannot proceed with merging - bamlisting not completed for ${tum_id}"
+    if ! check_checkpoint "bamlist" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "ERROR" "${workdir}" "${run_id}" "Cannot proceed with merging - bamlisting not completed for ${tum_id}"
         return 1
     fi
 
-    if check_checkpoint "merge" "${tum_id}" "${workdir}" "$dry_run"; then
-        log "INFO" "Skipping merging for ${tum_id} - already completed"
+    if check_checkpoint "merge" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "INFO" "${workdir}" "${run_id}" "Skipping merging for ${tum_id} - already completed"
         return 0
     fi
 
     # check if bam list contains at least 1 line
     if [ ! -f "${workdir}/manifests/${tum_id}_bams.list" ] || [ $(wc -l < "${workdir}/manifests/${tum_id}_bams.list") -eq 0 ]; then
-        log "ERROR" "No BAM files found for sample ${tum_id}"
+        log "ERROR" "${workdir}" "${run_id}" "No BAM files found for sample ${tum_id}"
         return 1
     fi
 
-    log "INFO" "Merging BAM files for sample ${tum_id}..."
+    log "INFO" "${workdir}" "${run_id}" "Merging BAM files for sample ${tum_id}..."
 
     gatk MergeSamFiles --USE_THREADING true \
         --arguments_file "${workdir}/manifests/${tum_id}_bams.list" \
@@ -316,8 +321,8 @@ process_merging() {
     samtools index "${outdir}/${tum_id}.merged.bam" "${outdir}/${tum_id}.merged.bai" && \
     aws s3 cp "${outdir}/${tum_id}.merged.bam" "${s3_dest}/${tum_id}/3_merged_bams/" && \
     aws s3 cp "${outdir}/${tum_id}.merged.bai" "${s3_dest}/${tum_id}/3_merged_bams/" && \
-    create_checkpoint "merge" "${tum_id}" "${workdir}" "$dry_run" || \
-    mark_failure "merge" "${tum_id}" "${workdir}" "$dry_run" "Merging failed for sample ${tum_id}"
+    create_checkpoint "merge" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
+    mark_failure "merge" "${tum_id}" "${workdir}" "${dry_run}" "Merging failed for sample ${tum_id}" "${run_id}"
 }
 
 main() {
@@ -326,22 +331,27 @@ main() {
     local workdir=$3
     local outdir=$4
     local dry_run=$5
-    local s3_loc=$6
-    local s3_dest=$7
+    local run_id=$6
+    local s3_loc=$7
+    local s3_dest=$8
 
     local timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
     local s3_mapping_file="${workdir}/manifests/data-s3-mapping--${timestamp}.txt"
     local s3_tum_id_file="${workdir}/manifests/data-s3-tum-ids--${timestamp}.txt"
+
+    # print the run id
+    log "INFO" "${workdir}" "${run_id}" "The current run ID: ${run_id}"
     
     # Create necessary directories
     if [ "$dry_run" = false ]; then
         mkdir -p "${workdir}"/{logs,flagfiles}
+        log "INFO" "${workdir}" "${run_id}" "Created directories: ${workdir}/{logs,flagfiles}"
     else
-        log "INFO" "DRY-RUN: Would create directories: ${workdir}/{logs,flagfiles}"
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create directories: ${workdir}/{logs,flagfiles}"
     fi
     
     # Initialize checkpoint system
-    init_checkpoints "${workdir}" "${dry_run}"
+    init_checkpoints "${workdir}" "${dry_run}" "${run_id}"
 
     # Generate S3 mappings
     while IFS=$'\t' read -r -a line; do
@@ -349,32 +359,32 @@ main() {
     done < <(tail -n +2 "${manifest}")
     
     if [ ! -s "${s3_mapping_file}" ]; then
-        log "ERROR" "S3 data mapping file is empty. No data found at target bucket."
+        log "ERROR" "${workdir}" "${run_id}" "S3 data mapping file is empty. No data found at target bucket."
         exit 1
     fi
     
-    log "INFO" "S3 prefix file created: ${s3_mapping_file}"
+    log "INFO" "${workdir}" "${run_id}" "S3 prefix file created: ${s3_mapping_file}"
     awk -F':' '{print $3}' "$s3_mapping_file" | uniq > "$s3_tum_id_file"
     
     # Process each stage
-    log "INFO" "Starting trimming stage..."
-    parallel --colsep ':' -j "$jobs" process_trimming {1} {2} {3} "${dry_run}" "${outdir}" "${workdir}" "${s3_loc}" "${s3_dest}" :::: "$s3_mapping_file"
+    log "INFO" "${workdir}" "${run_id}" "Starting trimming stage..."
+    parallel --colsep ':' -j "$jobs" process_trimming {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_loc}" "${s3_dest}" :::: "$s3_mapping_file"
     
-    log "INFO" "Starting mapping stage..."
-    parallel --colsep ':' -j "$jobs" process_mapping {1} {2} {3} "${dry_run}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_mapping_file"
+    log "INFO" "${workdir}" "${run_id}" "Starting mapping stage..."
+    parallel --colsep ':' -j "$jobs" process_mapping {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_mapping_file"
     
-    log "INFO" "Starting bamlisting stage..."
-    parallel --colsep ':' -j "$jobs" process_bamlisting {1} "${dry_run}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+    log "INFO" "${workdir}" "${run_id}" "Starting bamlisting stage..."
+    parallel --colsep ':' -j "$jobs" process_bamlisting {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
 
-    log "INFO" "Starting merging stage..."
-    parallel --colsep ':' -j "$jobs" process_merging {1} "${dry_run}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+    log "INFO" "${workdir}" "${run_id}" "Starting merging stage..."
+    parallel --colsep ':' -j "$jobs" process_merging {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
     
-    log "INFO" "Pipeline completed successfully!"
+    log "INFO" "${workdir}" "${run_id}" "Pipeline completed successfully!"
 }
 
 # Export functions for parallel execution
 export -f log create_checkpoint check_checkpoint mark_failure init_checkpoints \
     process_trimming process_mapping process_bamlisting process_merging
 
-main "$MANIFEST_FILE" "$JOBS" "$WORKING_DIR" "$OUTPUT_DIR" "$DRY_RUN" "$S3_LOC" "$S3_DEST"
+main "$MANIFEST_FILE" "$JOBS" "$WORKING_DIR" "$OUTPUT_DIR" "$DRY_RUN" "$RUN_ID" "$S3_LOC" "$S3_DEST"
 
