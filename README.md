@@ -21,6 +21,8 @@ To execute the workflow, just run the following Bash script.
 ```
 bash WES-DNA-SNV-CRMY.sh
 ```
+NOTE: Make sure that `bwa index [ref.fa]` has been run first to generate the BWA-compatible reference genome indices. 
+
 
 ## Workflow Overview
 The workflow consists of the following steps:
