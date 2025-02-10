@@ -399,7 +399,7 @@ merge_bams() {
 }
 
 # mark duplicates function
-mark_dupes () {
+mark_dupes() {
     local tum_id=$1
     local dry_run=$2
     local run_id=$3
@@ -446,7 +446,7 @@ mark_dupes () {
 }
 
 # split read function
-split_reads () {
+split_reads() {
     local tum_id=$1
     local dry_run=$2
     local run_id=$3
@@ -492,6 +492,147 @@ split_reads () {
     fi
 }
 
+# Base Quality Score Recalibration function - first pass (create recalibration table)
+model_bqsr() {
+    local tum_id=$1
+    local dry_run=$2
+    local run_id=$3
+    local outdir=$4
+    local workdir=$5
+    local s3_dest=$6
+
+    if [ "$dry_run" = true ]; then
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create BQSR model for sample ${tum_id} BAM"
+        return 0
+    fi
+
+    if ! check_checkpoint "splitreads" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "ERROR" "${workdir}" "${run_id}" "Cannot proceed with BQSR model - splitting reads not completed for ${tum_id}"
+        return 1
+    fi
+
+    if check_checkpoint "modelbqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "INFO" "${workdir}" "${run_id}" "Skipping BQSR modeling for ${tum_id} - already completed"
+        return 0
+    fi
+
+    log "INFO" "${workdir}" "${run_id}" "Creating BQSR model for sample ${tum_id} BAM..."
+
+    mkdir -p "${workdir}/tmp"
+
+    gatk BaseRecalibrator \
+    -I "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.split.bam" \
+    -O "${outdir}/${tum_id}.recal_data.grp" \
+    -R refs/GRCh38.109.fa \
+    --tmp-dir "${workdir}/tmp" \
+    --known-sites refs/Homo_sapiens_assembly38.known_indels.renamed.vcf \
+    --known-sites refs/Homo_sapiens_assembly38.dbsnp138.renamed.vcf \
+    --known-sites refs/Mills_and_1000G_gold_standard.indels.hg38.renamed.vcf && \
+    aws s3 cp "${outdir}/${tum_id}.recal_data.grp" "${s3_dest}/${tum_id}/7_recal_models/"
+    
+    create_checkpoint "modelbqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
+    mark_failure "modelbqsr" "${tum_id}" "${workdir}" "${dry_run}" "Creating recalibration model failed for sample ${tum_id}" "${run_id}"
+}
+
+# Base Quality Score Recalibration function - second pass (adjust recalibration score)
+apply_bqsr() {
+    local tum_id=$1
+    local dry_run=$2
+    local run_id=$3
+    local outdir=$4
+    local workdir=$5
+    local s3_dest=$6
+
+    if [ "$dry_run" = true ]; then
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would apply BQSR for sample ${tum_id} BAM"
+        return 0
+    fi
+
+    if ! check_checkpoint "modelbqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "ERROR" "${workdir}" "${run_id}" "Cannot proceed with BQSR application - model not created for ${tum_id}"
+        return 1
+    fi
+
+    if check_checkpoint "applybqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "INFO" "${workdir}" "${run_id}" "Skipping BQSR application for ${tum_id} - already completed"
+        return 0
+    fi
+
+    log "INFO" "${workdir}" "${run_id}" "Applying BQSR for sample ${tum_id} BAM..."
+
+    mkdir -p "${workdir}/tmp"
+
+    gatk ApplyBQSR \
+    -I "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.split.bam" \
+    -O "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.recal.bam" \
+    -R refs/GRCh38.109.fa \
+    -bqsr "${outdir}/${tum_id}.recal_data.grp" \
+    --tmp-dir "${workdir}/tmp" && \
+    aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.recal.bam" "${s3_dest}/${tum_id}/8_recal_bams/" && \
+    aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.recal.bai" "${s3_dest}/${tum_id}/8_recal_bams/"
+
+    create_checkpoint "applybqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
+    mark_failure "applybqsr" "${tum_id}" "${workdir}" "${dry_run}" "Applying recalibration failed for sample ${tum_id}" "${run_id}"
+
+    # Cleanup on success
+    if check_checkpoint "applybqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        # remove associated recal bams
+        rm "${outdir}/*${tum_id}.sorted.RG-added.merged.dedup.split.ba?" "${outdir}/*${tum_id}.recal_data.grp" 
+        log "INFO" "${workdir}" "${run_id}" "Applying recalibration completed successfully for ${tum_id}"
+    fi
+}
+
+# haplotype caller function
+call_haps() {
+    local tum_id=$1
+    local dry_run=$2
+    local run_id=$3
+    local outdir=$4
+    local workdir=$5
+    local s3_dest=$6
+
+    if [ "$dry_run" = true ]; then
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would call haplotypes for sample ${tum_id} BAM"
+        return 0
+    fi
+
+    if ! check_checkpoint "applybqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "ERROR" "${workdir}" "${run_id}" "Cannot proceed with haplotype calling - BQSR not applied for ${tum_id}"
+        return 1
+    fi
+
+    if check_checkpoint "callhaps" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "INFO" "${workdir}" "${run_id}" "Skipping haplotype calling for ${tum_id} - already completed"
+        return 0
+    fi
+
+    log "INFO" "${workdir}" "${run_id}" "Calling haplotypes for sample ${tum_id} BAM..."
+
+    mkdir -p "${workdir}/tmp"
+
+    gatk HaplotypeCaller \
+    -R refs/GRCh38.109.fa \
+    -I "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.recal.bam" \
+    -O "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf.gz" \
+    --tmp-dir "${workdir}/tmp" \
+    --dont-use-soft-clipped-bases \
+    2>"${workdir}/logs/${tum_id}.gatk4.all.germline.haps.vcf.gz.log" && \
+    gzip -dk "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf.gz" && \
+    aws s3 cp "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf.gz" "${s3_dest}/${tum_id}/9_germline_haps_vcfs/" && \
+    aws s3 cp "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf.gz.log" "${s3_dest}/${tum_id}/9_germline_haps_vcfs/" && \
+    aws s3 cp "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf" "${s3_dest}/${tum_id}/9_germline_haps_vcfs/"
+
+    create_checkpoint "callhaps" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
+    mark_failure "callhaps" "${tum_id}" "${workdir}" "${dry_run}" "Haplotype calling failed for sample ${tum_id}" "${run_id}"
+
+    # Cleanup on success
+    if check_checkpoint "callhaps" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        # remove associated recal bams
+        rm "${outdir}/*${tum_id}.sorted.RG-added.merged.dedup.recal.ba?"
+        rm "${outdir}/*${tum_id}.gatk4.all.germline.haps.vcf.gz" "${outdir}/*${tum_id}.gatk4.all.germline.haps.vcf"
+        log "INFO" "${workdir}" "${run_id}" "Haplotype calling completed successfully for ${tum_id}"
+    fi
+}
 
 # Main function
 main() {
@@ -523,28 +664,45 @@ main() {
     log "INFO" "${workdir}" "${run_id}" "S3 prefix file created: ${s3_mapping_file}"
     awk -F':' '{print $3}' "$s3_mapping_file" | uniq > "$s3_tum_id_file"
     
-    # Process each stage
+    ###### MAIN PIPELINE ######
+    # 1. TRIMMING
     log "INFO" "${workdir}" "${run_id}" "Starting trimming stage..."
     parallel --colsep ':' -j "$jobs" trim_reads {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_loc}" "${s3_dest}" :::: "$s3_mapping_file"
     
+    # 2. MAPPING
     log "INFO" "${workdir}" "${run_id}" "Starting mapping stage..."
     parallel --colsep ':' -j "$jobs" map_reads {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_mapping_file"
 
+    # 3. ADDING READGROUPS AND 4. LISTING BAMS
     log "INFO" "${workdir}" "${run_id}" "Starting readgroup addition stage..."
     parallel --colsep ':' -j "$jobs" add_readgroups {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_mapping_file" && \
     parallel --colsep ':' -j "$jobs" list_bams {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
 
     log "INFO" "${workdir}" "${run_id}" "Listing bams completed successfully!"
 
+    # 5. MERGING BAMS
     log "INFO" "${workdir}" "${run_id}" "Starting merging stage..."
     parallel --colsep ':' -j "$jobs" merge_bams {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
 
+    # 6. MARKING DUPLICATES
     log "INFO" "${workdir}" "${run_id}" "Starting marking duplicates stage..."
     parallel --colsep ':' -j "$jobs" mark_dupes {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
 
+    # 7. SPLITTING READS
     log "INFO" "${workdir}" "${run_id}" "Starting splitting reads stage..."
     parallel --colsep ':' -j "$jobs" split_reads {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
 
+    # 8. BASE QUALITY SCORE RECALIBRATION (first pass) - model creation
+    log "INFO" "${workdir}" "${run_id}" "Starting BQSR model creation stage..."
+    parallel --colsep ':' -j "$jobs" model_bqsr {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+
+    # 9. BASE QUALITY SCORE RECALIBRATION (second pass) - apply recalibration
+    log "INFO" "${workdir}" "${run_id}" "Starting BQSR application stage..."
+    parallel --colsep ':' -j "$jobs" apply_bqsr {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+
+    # 10. HAPLOTYPE CALLING
+    log "INFO" "${workdir}" "${run_id}" "Starting haplotype calling stage..."
+    parallel --colsep ':' -j "$jobs" call_haps {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
     
     log "INFO" "${workdir}" "${run_id}" "Pipeline completed successfully!"
 }
@@ -563,9 +721,10 @@ export -f \
             list_bams \
             merge_bams \
             mark_dupes \
-            split_reads
-
-
+            split_reads \
+            model_bqsr \
+            apply_bqsr \
+            call_haps
 
 # Initialize directory structure before any logging occurs
 init_directories "${WORKING_DIR}" "${DRY_RUN}" "${RUN_ID}"
