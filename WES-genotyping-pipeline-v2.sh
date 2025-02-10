@@ -504,12 +504,8 @@ main() {
     local s3_loc=$7
     local s3_dest=$8
 
-    local timestamp=$(date '+%Y-%m-%d_%H-%M-%S')
-    local s3_mapping_file="${workdir}/manifests/data-s3-mapping--${timestamp}.txt"
-    local s3_tum_id_file="${workdir}/manifests/data-s3-tum-ids--${timestamp}.txt"
-
-    # print the run id
-    log "INFO" "${workdir}" "${run_id}" "The current run ID: ${run_id}"
+    local s3_mapping_file="${workdir}/manifests/${run_id}--data-s3-mapping.txt"
+    local s3_tum_id_file="${workdir}/manifests/${run_id}--data-s3-tum-ids.txt"
     
     # Initialize checkpoint system
     init_checkpoints "${workdir}" "${dry_run}" "${run_id}"
