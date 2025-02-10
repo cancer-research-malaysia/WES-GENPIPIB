@@ -10,7 +10,8 @@ Options:
     -h, --help       Show this help message
     -d, --dry-run    Run in dry-run mode to test S3 file paths
     -o, --output     Specify data directory (default: script directory)
-    -j, --jobs       Number of parallel jobs (default: 4)
+    -j, --jobs       Number of parallel jobs (default: 2)
+    -r, --run-id     Specify previous run ID to rerun a pipeline (default: random UUID)
 
 Argument:
     MANIFEST.TSV     File path to the data manifest file
@@ -22,21 +23,19 @@ EOF
 DRY_RUN=false
 OUTPUT_DIR=$(dirname "$0")
 WORKING_DIR=$(pwd)
-JOBS=3
-
+JOBS=2
+RUN_ID=$(uuidgen | cut -d'-' -f1)
 S3_LOC="s3://crm.sequencing.raw.data.sharing/batch1/SLX"
-S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-TUM"
-
-# generate a ID for the run
-RUN_ID=$(head -c 8 /dev/urandom | xxd -p)
+S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-TUM-iter2"
 
 # Parse command line arguments
-while getopts "hdo:j:" opt; do
+while getopts "hdo:j:r:" opt; do
     case $opt in
         h) usage ;;
         d) DRY_RUN=true ;;
         o) OUTPUT_DIR="$OPTARG" ;;
         j) JOBS="$OPTARG" ;;
+        r) RUN_ID="$OPTARG" ;;
         \?) usage ;;
     esac
 done
@@ -49,6 +48,25 @@ if [ $# -ne 1 ]; then
 fi
 
 MANIFEST_FILE=$1
+
+# Directory setup function
+# Initialize directory structure
+init_directories() {
+    local workdir=$1
+    local dry_run=$2
+    local run_id=$3
+
+    if [ "$dry_run" = false ]; then
+        # Create base directories
+        mkdir -p "${workdir}"/{logs,flagfiles}
+        # Create run-specific directories
+        mkdir -p "${workdir}/flagfiles/${run_id}"
+        touch "${workdir}/logs/${run_id}-WES-pipeline.log"  # Ensure log file exists
+        log "INFO" "${workdir}" "${run_id}" "Created directory structure for run ${run_id}"
+    else
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create directory structure for run ${run_id}"
+    fi
+}
 
 # Logging function
 log() {
@@ -67,7 +85,7 @@ log() {
     # Output colored version to terminal
     echo -e "${color}${log_message}\033[0m" >&2
     # Output non-colored version to log file
-    echo "${log_message}" >> "${workdir}/logs/${run_id}-pipeline-$(date '+%Y-%m-%d').log"
+    echo "${log_message}" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
 }
 
 # Checkpoint management functions
@@ -125,7 +143,6 @@ init_checkpoints() {
     local run_id=$3
 
     if [ "$dry_run" = false ]; then
-        mkdir -p "${workdir}/flagfiles/${run_id}"
         log "INFO" "${workdir}" "${run_id}" "Initialized checkpoint directory"
     else
         log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create checkpoint directory at ${workdir}/flagfiles/${run_id}"
@@ -137,10 +154,12 @@ get_s3_files() {
     local slx_id=$1
     local tum_id=$2
     local file_prefix=$3
-    local s3_loc=$4
-    local s3_mapping=$5
+    local workdir=$4
+    local run_id=$5
+    local s3_loc=$6
+    local s3_mapping=$7
     
-    log "INFO" "Fetching file prefixes for SLX-${slx_id}..."
+    log "INFO" "${workdir}" "${run_id}" "Fetching file prefixes for SLX-${slx_id}..."
     aws s3 ls "${s3_loc}-${slx_id}/" | \
         grep "SLX-${file_prefix}\." | \
         awk '{print $NF}' | \
@@ -155,7 +174,7 @@ get_s3_files() {
 }
 
 # Processing functions
-process_trimming() {
+trim_reads() {
     local slx_id=$1
     local prefix=$2
     local tum_id=$3
@@ -198,7 +217,7 @@ process_trimming() {
     fi
 }
 
-process_mapping() {
+map_reads() {
     local slx_id=$1
     local prefix=$2
     local tum_id=$3
@@ -246,7 +265,54 @@ process_mapping() {
     fi
 }
 
-process_bamlisting() {
+add_readgroups () {
+    local slx_id=$1
+    local prefix=$2
+    local tum_id=$3
+    local dry_run=$4
+    local run_id=$5
+    local outdir=$6
+    local workdir=$7
+    local s3_dest=$8
+
+    if [ "$dry_run" = true ]; then
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would add read groups for file {$prefix} of sample ${tum_id}"
+        return 0
+    fi
+
+    if ! check_checkpoint "map" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "ERROR" "${workdir}" "${run_id}" "Cannot proceed with adding read groups - mapping not completed for ${tum_id}"
+        return 1
+    fi
+
+    if check_checkpoint "addrg" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "INFO" "${workdir}" "${run_id}" "Skipping adding read groups for ${tum_id} - already completed"
+        return 0
+    fi
+
+    log "INFO" "${workdir}" "${run_id}" "Adding read groups for file {$prefix} of sample ${tum_id}..."
+
+    gatk AddOrReplaceReadGroups \
+    -I "${outdir}/${prefix}_${tum_id}.sorted.bam" \
+    -O "${outdir}/${prefix}_${tum_id}.sorted.RG-added.bam" \
+    --RGID "SLX-${slx_id}" \
+    --RGLB $(echo "${prefix}" | cut -d '.' -f 1,2) \
+    --RGPL Illumina \
+    --RGPU "SLX-${slx_id}.${tum_id}" \
+    --RGSM "${tum_id}_TUM" && \
+    aws s3 cp "${outdir}/${prefix}_${tum_id}.sorted.RG-added.bam" "${s3_dest}/${tum_id}/3_rg_added_bams/" && \
+    create_checkpoint "addrg" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
+    mark_failure "addrg" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "Adding read groups failed for sample ${tum_id}" "${run_id}"
+
+    # Cleanup on success
+    if check_checkpoint "addrg" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        rm "${outdir}/${prefix}_${tum_id}.sorted.bam"
+        log "INFO" "${workdir}" "${run_id}" "Read groups added successfully for ${tum_id}"
+    fi
+    
+}
+
+list_bams() {
     local tum_id=$1
     local dry_run=$2
     local run_id=$3
@@ -264,8 +330,8 @@ process_bamlisting() {
     #     return 1
     # fi
 
-    if check_checkpoint "bamlist" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
-        log "INFO" "${workdir}" "${run_id}" "Skipping bamlisting for ${tum_id} - already completed"
+    if check_checkpoint "listbams" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "INFO" "${workdir}" "${run_id}" "Skipping listing bams for ${tum_id} - already completed"
         return 0
     fi
 
@@ -273,18 +339,18 @@ process_bamlisting() {
     
     local bam_list="${workdir}/manifests/${tum_id}_bams.list"
     
-    aws s3 ls "${s3_dest}/${tum_id}/2_bwa_out/" | \
-        grep ".sorted.bam$" | \
+    aws s3 ls "${s3_dest}/${tum_id}/3_rg_added_bams/" | \
+        grep "sorted.RG-added.bam$" | \
         awk '{print $NF}' | \
         while read -r l; do 
             echo "-I $l"
         done >> "$bam_list"
     
-    create_checkpoint "bamlist" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
-    mark_failure "bamlist" "${tum_id}" "${workdir}" "${dry_run}" "Bamlisting failed for sample ${tum_id}" "${run_id}"
+    create_checkpoint "listbams" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
+    mark_failure "listbams" "${tum_id}" "${workdir}" "${dry_run}" "Listing bams failed for sample ${tum_id}" "${run_id}"
 }
 
-process_merging() {
+merge_bams() {
     local tum_id=$1
     local dry_run=$2
     local run_id=$3
@@ -297,8 +363,8 @@ process_merging() {
         return 0
     fi
     
-    if ! check_checkpoint "bamlist" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
-        log "ERROR" "${workdir}" "${run_id}" "Cannot proceed with merging - bamlisting not completed for ${tum_id}"
+    if ! check_checkpoint "listbams" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "ERROR" "${workdir}" "${run_id}" "Cannot proceed with merging - listing bams not completed for ${tum_id}"
         return 1
     fi
 
@@ -317,14 +383,117 @@ process_merging() {
 
     gatk MergeSamFiles --USE_THREADING true \
         --arguments_file "${workdir}/manifests/${tum_id}_bams.list" \
-        -O "${outdir}/${tum_id}.merged.bam" && \
-    samtools index "${outdir}/${tum_id}.merged.bam" "${outdir}/${tum_id}.merged.bai" && \
-    aws s3 cp "${outdir}/${tum_id}.merged.bam" "${s3_dest}/${tum_id}/3_merged_bams/" && \
-    aws s3 cp "${outdir}/${tum_id}.merged.bai" "${s3_dest}/${tum_id}/3_merged_bams/" && \
+        -O "${outdir}/${tum_id}.sorted.RG-added.merged.bam" && \
+    samtools index "${outdir}/${tum_id}.sorted.RG-added.merged.bam" "${outdir}/${tum_id}.sorted.RG-added.merged.bai" && \
+    aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.bam" "${s3_dest}/${tum_id}/4_merged_bams/" && \
+    aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.bai" "${s3_dest}/${tum_id}/4_merged_bams/" && \
     create_checkpoint "merge" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "merge" "${tum_id}" "${workdir}" "${dry_run}" "Merging failed for sample ${tum_id}" "${run_id}"
+
+    # Cleanup on success
+    if check_checkpoint "merge" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        # remove associated RG-added bams
+        rm "${outdir}/*${tum_id}.sorted.RG-added.bam"
+        log "INFO" "${workdir}" "${run_id}" "Merging completed successfully for ${tum_id}"
+    fi
 }
 
+# mark duplicates function
+mark_dupes () {
+    local tum_id=$1
+    local dry_run=$2
+    local run_id=$3
+    local outdir=$4
+    local workdir=$5
+    local s3_dest=$6
+
+    if [ "$dry_run" = true ]; then
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would mark duplicates for sample ${tum_id} BAM"
+        return 0
+    fi
+
+    if ! check_checkpoint "merge" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "ERROR" "${workdir}" "${run_id}" "Cannot proceed with marking duplicates - merging not completed for ${tum_id}"
+        return 1
+    fi
+
+    if check_checkpoint "markdupes" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "INFO" "${workdir}" "${run_id}" "Skipping marking duplicates for ${tum_id} - already completed"
+        return 0
+    fi
+
+    log "INFO" "${workdir}" "${run_id}" "Marking duplicates for sample ${tum_id} BAM..."
+
+    gatk MarkDuplicates \
+    -I "${outdir}/${tum_id}.sorted.RG-added.merged.bam" \
+    -O "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.bam" \
+    -M "${outdir}/${tum_id}.normal.MarkDup.metrics" \
+    --CREATE_INDEX true \
+    --VALIDATION_STRINGENCY SILENT && \ 
+    aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.bam" "${s3_dest}/${tum_id}/5_dedupped_bams/" && \
+    aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.bai" "${s3_dest}/${tum_id}/5_dedupped_bams/" && \ 
+    aws s3 cp "${outdir}/${tum_id}.normal.MarkDup.metrics" "${s3_dest}/${tum_id}/5_dedupped_bams/" && \
+
+    create_checkpoint "markdupes" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
+    mark_failure "markdupes" "${tum_id}" "${workdir}" "${dry_run}" "Marking duplicates failed for sample ${tum_id}" "${run_id}"
+
+    # Cleanup on success
+    if check_checkpoint "markdupes" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        # remove associated merged bams
+        rm "${outdir}/*${tum_id}.sorted.RG-added.merged.ba?"
+        log "INFO" "${workdir}" "${run_id}" "Marking duplicates completed successfully for ${tum_id}"
+    fi
+}
+
+# split read function
+split_reads () {
+    local tum_id=$1
+    local dry_run=$2
+    local run_id=$3
+    local outdir=$4
+    local workdir=$5
+    local s3_dest=$6
+
+    if [ "$dry_run" = true ]; then
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would split reads for sample ${tum_id} BAM"
+        return 0
+    fi
+
+    if ! check_checkpoint "markdupes" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "ERROR" "${workdir}" "${run_id}" "Cannot proceed with splitting reads - marking duplicates not completed for ${tum_id}"
+        return 1
+    fi
+
+    if check_checkpoint "splitreads" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "INFO" "${workdir}" "${run_id}" "Skipping splitting reads for ${tum_id} - already completed"
+        return 0
+    fi
+
+    log "INFO" "${workdir}" "${run_id}" "Splitting reads for sample ${tum_id} BAM..."
+
+    mkdir -p "${workdir}/tmp"
+
+    gatk SplitNCigarReads \
+    -I "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.bam" \
+    -O "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.split.bam" \
+    -R refs/GRCh38.109.fa \
+    --tmp-dir "${workdir}/tmp" && \
+    aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.split.bam" "${s3_dest}/${tum_id}/6_split_bams/" && \
+    aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.split.bai" "${s3_dest}/${tum_id}/6_split_bams/"
+
+    create_checkpoint "splitreads" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
+    mark_failure "splitreads" "${tum_id}" "${workdir}" "${dry_run}" "Splitting reads failed for sample ${tum_id}" "${run_id}"
+
+    # Cleanup on success
+    if check_checkpoint "splitreads" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        # remove associated dedupped bams
+        rm "${outdir}/*${tum_id}.sorted.RG-added.merged.dedup.ba?"
+        log "INFO" "${workdir}" "${run_id}" "Splitting reads completed successfully for ${tum_id}"
+    fi
+}
+
+
+# Main function
 main() {
     local manifest=$1
     local jobs=$2
@@ -342,20 +511,12 @@ main() {
     # print the run id
     log "INFO" "${workdir}" "${run_id}" "The current run ID: ${run_id}"
     
-    # Create necessary directories
-    if [ "$dry_run" = false ]; then
-        mkdir -p "${workdir}"/{logs,flagfiles}
-        log "INFO" "${workdir}" "${run_id}" "Created directories: ${workdir}/{logs,flagfiles}"
-    else
-        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create directories: ${workdir}/{logs,flagfiles}"
-    fi
-    
     # Initialize checkpoint system
     init_checkpoints "${workdir}" "${dry_run}" "${run_id}"
 
     # Generate S3 mappings
     while IFS=$'\t' read -r -a line; do
-        get_s3_files "${line[2]}" "${line[1]}" "${line[0]}" "${s3_loc}" "${s3_mapping_file}"
+        get_s3_files "${line[2]}" "${line[1]}" "${line[0]}" "${workdir}" "${run_id}" "${s3_loc}" "${s3_mapping_file}"
     done < <(tail -n +2 "${manifest}")
     
     if [ ! -s "${s3_mapping_file}" ]; then
@@ -368,23 +529,53 @@ main() {
     
     # Process each stage
     log "INFO" "${workdir}" "${run_id}" "Starting trimming stage..."
-    parallel --colsep ':' -j "$jobs" process_trimming {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_loc}" "${s3_dest}" :::: "$s3_mapping_file"
+    parallel --colsep ':' -j "$jobs" trim_reads {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_loc}" "${s3_dest}" :::: "$s3_mapping_file"
     
     log "INFO" "${workdir}" "${run_id}" "Starting mapping stage..."
-    parallel --colsep ':' -j "$jobs" process_mapping {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_mapping_file"
-    
-    log "INFO" "${workdir}" "${run_id}" "Starting bamlisting stage..."
-    parallel --colsep ':' -j "$jobs" process_bamlisting {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+    parallel --colsep ':' -j "$jobs" map_reads {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_mapping_file"
+
+    log "INFO" "${workdir}" "${run_id}" "Starting readgroup addition stage..."
+    parallel --colsep ':' -j "$jobs" add_readgroups {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_mapping_file" && \
+    parallel --colsep ':' -j "$jobs" list_bams {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+
+    log "INFO" "${workdir}" "${run_id}" "Listing bams completed successfully!"
 
     log "INFO" "${workdir}" "${run_id}" "Starting merging stage..."
-    parallel --colsep ':' -j "$jobs" process_merging {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+    parallel --colsep ':' -j "$jobs" merge_bams {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+
+    log "INFO" "${workdir}" "${run_id}" "Starting marking duplicates stage..."
+    parallel --colsep ':' -j "$jobs" mark_dupes {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+
+    log "INFO" "${workdir}" "${run_id}" "Starting splitting reads stage..."
+    parallel --colsep ':' -j "$jobs" split_reads {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+
     
     log "INFO" "${workdir}" "${run_id}" "Pipeline completed successfully!"
 }
 
 # Export functions for parallel execution
-export -f log create_checkpoint check_checkpoint mark_failure init_checkpoints \
-    process_trimming process_mapping process_bamlisting process_merging
+export -f \
+        init_directories \
+        log \
+        create_checkpoint \
+        check_checkpoint \
+        mark_failure \
+        init_checkpoints \
+            trim_reads \
+            map_reads \
+            add_readgroups \
+            list_bams \
+            merge_bams \
+            mark_dupes \
+            split_reads
 
+
+
+# Initialize directory structure before any logging occurs
+init_directories "${WORKING_DIR}" "${DRY_RUN}" "${RUN_ID}"
+log "INFO" "${WORKING_DIR}" "${RUN_ID}" "Initialized directory structure."
+log "INFO" "${WORKING_DIR}" "${RUN_ID}" "Current RUN ID is: ${RUN_ID}"
+
+# run the main function
 main "$MANIFEST_FILE" "$JOBS" "$WORKING_DIR" "$OUTPUT_DIR" "$DRY_RUN" "$RUN_ID" "$S3_LOC" "$S3_DEST"
 
