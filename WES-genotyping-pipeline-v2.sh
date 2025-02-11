@@ -27,7 +27,7 @@ JOBS=2
 RUN_ID=$(uuidgen | cut -d'-' -f1)
 READ_DATATYPE="TUM"
 S3_LOC="s3://crm.sequencing.raw.data.sharing/batch1/SLX"
-S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-TUM-iter5"
+S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-TUM"
 
 # Parse command line arguments
 while getopts "hdo:j:r:" opt; do
@@ -815,7 +815,7 @@ log "INFO" "${WORKING_DIR}" "${RUN_ID}" "Initialized directory structure."
 log "INFO" "${WORKING_DIR}" "${RUN_ID}" "Current RUN ID is: ${RUN_ID}"
 
 # check for flagfile run-id directory to see if it was a previous run
-if [ -d "${WORKING_DIR}/flagfiles/${RUN_ID}" ]; then
+if [ -d "${WORKING_DIR}/flagfiles/${RUN_ID}" ] && [ -n "$(ls -A "${WORKING_DIR}/flagfiles/${RUN_ID}")" ]; then
     log "INFO" "${WORKING_DIR}" "${RUN_ID}" "Found previous run with same RUN ID. This will be treated as a re-run/resume."
     # empty mapping file to avoid redundant appending
     : > "${WORKING_DIR}/manifests/${RUN_ID}--data-s3-mapping.txt"
