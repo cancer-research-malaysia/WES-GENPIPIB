@@ -26,7 +26,7 @@ WORKING_DIR=$(pwd)
 JOBS=2
 RUN_ID=$(uuidgen | cut -d'-' -f1)
 S3_LOC="s3://crm.sequencing.raw.data.sharing/batch1/SLX"
-S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-TUM-iter2"
+S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-TUM-iter3"
 
 # Parse command line arguments
 while getopts "hdo:j:r:" opt; do
@@ -85,7 +85,7 @@ log() {
     # Output colored version to terminal
     echo -e "${color}${log_message}\033[0m" >&2
     # Output non-colored version to log file
-    echo "${log_message}" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
+    echo "${log_message}" > "${workdir}/logs/${run_id}-WES-pipeline.log"
 }
 
 # Checkpoint management functions
@@ -167,7 +167,7 @@ get_s3_files() {
         grep -v 0000 | \
         cut -d '.' -f 1,2,3,4 | \
         sort | uniq | \
-        awk -v tid="$tum_id" -v slx="$slx_id" '{print slx ":" $0 ":" tid}' >> "$s3_mapping"
+        awk -v tid="$tum_id" -v slx="$slx_id" '{print slx ":" $0 ":" tid}' > "$s3_mapping"
         # # debug lines
         # awk -v tid="$tum_id" -v slx="$slx_id" '{print slx ":" $0 ":" tid}' | \
         # tee -a "$s3_mapping"
