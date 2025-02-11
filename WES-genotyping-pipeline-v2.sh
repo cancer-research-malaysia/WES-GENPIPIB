@@ -50,38 +50,6 @@ fi
 
 MANIFEST_FILE=$1
 
-# Directory setup function
-# Initialize directory structure
-init_directories() {
-    local workdir=$1
-    local dry_run=$2
-    local run_id=$3
-
-    if [ "$dry_run" = false ]; then
-        # Create base directories
-        mkdir -p "${workdir}/logs"
-        # Create run-specific directories
-        mkdir -p "${workdir}/flagfiles/${run_id}"
-
-        # Check if this is a rerun by looking at log file
-        if [ -f "${workdir}/logs/${run_id}-WES-pipeline.log" ]; then
-            # Add clear separator for rerun
-            echo -e "\n\n" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
-            echo "=====================================================" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
-            echo "RERUNNING PIPELINE WITH RUN ID: ${run_id}" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
-            echo "RERUN STARTED AT: $(date '+%Y-%m-%d %H:%M:%S')" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
-            echo "=====================================================" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
-            echo -e "\n" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
-            log "INFO" "${workdir}" "${run_id}" "Restarting..."
-        else
-            # First time run - just create the file
-            touch "${workdir}/logs/${run_id}-WES-pipeline.log"
-        fi
-    else
-        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create directory structure for run ${run_id}"
-    fi
-}
-
 # Logging function
 log() {
     local level=$1
@@ -102,7 +70,52 @@ log() {
     echo "${log_message}" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
 }
 
-# Checkpoint management functions
+# Directory setup function
+# Initialize directory structure
+init_directories() {
+    local workdir=$1
+    local dry_run=$2
+    local run_id=$3
+
+    if [ "$dry_run" = false ]; then
+        # Create base directories
+        mkdir -p "${workdir}/{logs,flagfiles}"
+
+        # Check if this is a rerun by looking at log file
+        if [ -f "${workdir}/logs/${run_id}-WES-pipeline.log" ]; then
+            # Add clear separator for rerun
+            echo -e "\n\n" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
+            echo "=====================================================" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
+            echo "RERUNNING PIPELINE WITH RUN ID: ${run_id}" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
+            echo "RERUN STARTED AT: $(date '+%Y-%m-%d %H:%M:%S')" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
+            echo "=====================================================" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
+            echo -e "\n" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
+            log "INFO" "${workdir}" "${run_id}" "Restarting..."
+        else
+            # First time run - just create the file
+            touch "${workdir}/logs/${run_id}-WES-pipeline.log"
+        fi
+    else
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create directory structure for run ${run_id}"
+    fi
+}
+
+######## Checkpoint management functions ###############
+# helper function to initialize checkpoint directory
+init_checkpoints() {
+    local workdir=$1
+    local dry_run=$2
+    local run_id=$3
+
+    if [ "$dry_run" = false ]; then
+        # Create run-specific directories
+        mkdir -p "${workdir}/flagfiles/${run_id}"
+        log "INFO" "${workdir}" "${run_id}" "Initialized checkpoint directory."
+    else
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create checkpoint directory at ${workdir}/flagfiles/${run_id}"
+    fi
+}
+
 create_checkpoint() {
     local stage=$1
     local identifier=$2
@@ -150,19 +163,6 @@ mark_failure() {
     return 1
 }
 
-# helper function to initialize checkpoint directory
-init_checkpoints() {
-    local workdir=$1
-    local dry_run=$2
-    local run_id=$3
-
-    if [ "$dry_run" = false ]; then
-        log "INFO" "${workdir}" "${run_id}" "Initialized checkpoint directory"
-    else
-        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create checkpoint directory at ${workdir}/flagfiles/${run_id}"
-    fi
-}
-
 # S3 file mapping function
 get_s3_files() {
     local slx_id=$1
@@ -187,7 +187,7 @@ get_s3_files() {
         # tee -a "$s3_mapping"
 }
 
-# Processing functions
+####### PROCESSING FUNCTIONS ##############
 trim_reads() {
     local slx_id=$1
     local prefix=$2
@@ -821,6 +821,8 @@ if [ -d "${WORKING_DIR}/flagfiles/${RUN_ID}" ] && [ -n "$(ls -A "${WORKING_DIR}/
     : > "${WORKING_DIR}/manifests/${RUN_ID}--data-s3-mapping.txt"
     # delete failed flags from run_id dir
     find "${WORKING_DIR}/flagfiles/${RUN_ID}/" -name *failed -delete
+else
+    log "INFO" "${WORKING_DIR}" "${RUN_ID}" "This is a fresh run."
 fi
 
 # run the main function
