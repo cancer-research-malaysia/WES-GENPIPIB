@@ -819,7 +819,8 @@ if [ -d "${WORKING_DIR}/flagfiles/${RUN_ID}" ]; then
     log "INFO" "${WORKING_DIR}" "${RUN_ID}" "Found previous run with same RUN ID. This will be treated as a re-run/resume."
     # empty mapping file to avoid redundant appending
     : > "${WORKING_DIR}/manifests/${RUN_ID}--data-s3-mapping.txt"
-
+    # delete failed flags from run_id dir
+    find "${WORKING_DIR}/flagfiles/${RUN_ID}/" -name *failed -delete
 fi
 
 # run the main function
