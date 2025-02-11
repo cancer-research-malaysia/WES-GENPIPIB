@@ -185,12 +185,12 @@ trim_reads() {
     local s3_loc=$8
     local s3_dest=$9
     
-    if check_checkpoint "trim" "${prefix}" "${workdir}" "${dry_run}" "${run_id}"; then
+    if check_checkpoint "trim" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         log "INFO" "${workdir}" "${run_id}" "Skipping trimming for ${prefix} - already completed"
         return 0
     fi
 
-    log "INFO" "${workdir}" "${run_id}" "Trimming FASTQ files for SLX-${slx_id} of sample ${tum_id}..."
+    log "INFO" "${workdir}" "${run_id}" "Trimming FASTQ files for SLX-${prefix} of sample ${tum_id}..."
 
     if [ "$dry_run" = true ]; then
         log "INFO" "${workdir}" "${run_id}" "DRY-RUN mode enabled!"
@@ -207,11 +207,11 @@ trim_reads() {
         2>"${workdir}/logs/${prefix}.trimgalore.log" && \
     aws s3 cp "${outdir}/${prefix}.r_1_val_1.fq.gz" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
     aws s3 cp "${outdir}/${prefix}.r_2_val_2.fq.gz" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
-    create_checkpoint "trim" "${prefix}" "${workdir}" "${dry_run}" "${run_id}" || \
-    mark_failure "trim" "${prefix}" "${workdir}" "${dry_run}" "TrimGalore failed for SLX-${slx_id} of sample ${tum_id}" "${run_id}"
+    create_checkpoint "trim" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
+    mark_failure "trim" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "TrimGalore failed for SLX-${slx_id} of sample ${tum_id}" "${run_id}"
 
     # Cleanup on success
-    if check_checkpoint "trim" "${prefix}" "${workdir}" "${dry_run}" "${run_id}"; then
+    if check_checkpoint "trim" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         rm "${outdir}/${prefix}.r_1.fq.gz" "${outdir}/${prefix}.r_2.fq.gz"
         log "INFO" "${workdir}" "${run_id}" "TrimGalore completed successfully for ${prefix}"
     fi
@@ -232,13 +232,13 @@ map_reads() {
         return 0
     fi
     
-    if ! check_checkpoint "trim" "${prefix}" "${workdir}" "${dry_run}" "${run_id}"; then
-        log "ERROR" "${workdir}" "${run_id}" "Cannot proceed with mapping - trimming not completed for ${prefix}"
+    if ! check_checkpoint "trim" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "ERROR" "${workdir}" "${run_id}" "Cannot proceed with mapping - trimming not completed for ${prefix} of sample ${tum_id}"
         return 1
     fi
 
-    if check_checkpoint "map" "${prefix}" "${workdir}" "${dry_run}" "${run_id}"; then
-        log "INFO" "${workdir}" "${run_id}" "Skipping mapping for ${prefix} - already completed"
+    if check_checkpoint "map" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "INFO" "${workdir}" "${run_id}" "Skipping mapping for ${prefix}_${tum_id} - already completed"
         return 0
     fi
 
@@ -261,6 +261,7 @@ map_reads() {
     # Cleanup on success
     if check_checkpoint "map" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         rm "${outdir}/${prefix}_${tum_id}.r_1_bwa_in.fq" "${outdir}/${prefix}_${tum_id}.r_2_bwa_in.fq"
+        rm "${outdir}/${prefix}.r_1_val_1.fq.gz" "${outdir}/${prefix}.r_2_val_2.fq.gz"
         log "INFO" "${workdir}" "${run_id}" "BWA mapping completed successfully for ${prefix}_${tum_id}"
     fi
 }
@@ -280,12 +281,12 @@ add_readgroups () {
         return 0
     fi
 
-    if ! check_checkpoint "map" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+    if ! check_checkpoint "map" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         log "ERROR" "${workdir}" "${run_id}" "Cannot proceed with adding read groups - mapping not completed for ${tum_id}"
         return 1
     fi
 
-    if check_checkpoint "addrg" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+    if check_checkpoint "addrg" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         log "INFO" "${workdir}" "${run_id}" "Skipping adding read groups for ${tum_id} - already completed"
         return 0
     fi
@@ -667,44 +668,56 @@ main() {
     ###### MAIN PIPELINE ######
     # 1. TRIMMING
     log "INFO" "${workdir}" "${run_id}" "Starting trimming stage..."
-    parallel --colsep ':' -j "$jobs" trim_reads {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_loc}" "${s3_dest}" :::: "$s3_mapping_file"
-    
+    parallel --colsep ':' -j "$jobs" trim_reads {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_loc}" "${s3_dest}" :::: "$s3_mapping_file" && \
+    log "INFO" "${workdir}" "${run_id}" "Trimming completed successfully!"
+
     # 2. MAPPING
     log "INFO" "${workdir}" "${run_id}" "Starting mapping stage..."
-    parallel --colsep ':' -j "$jobs" map_reads {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_mapping_file"
+    parallel --colsep ':' -j "$jobs" map_reads {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_mapping_file" && \
+    log "INFO" "${workdir}" "${run_id}" "Mapping completed successfully!"
 
-    # 3. ADDING READGROUPS AND 4. LISTING BAMS
+    # 3. ADDING READGROUPS
     log "INFO" "${workdir}" "${run_id}" "Starting readgroup addition stage..."
     parallel --colsep ':' -j "$jobs" add_readgroups {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_mapping_file" && \
-    parallel --colsep ':' -j "$jobs" list_bams {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+    log "INFO" "${workdir}" "${run_id}" "Readgroup addition completed successfully!"
 
+    # 4. LISTING BAMS
+    log "INFO" "${workdir}" "${run_id}" "Listing bam-level tumor IDs..."
+    parallel --colsep ':' -j "$jobs" list_bams {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file" && \
     log "INFO" "${workdir}" "${run_id}" "Listing bams completed successfully!"
 
     # 5. MERGING BAMS
     log "INFO" "${workdir}" "${run_id}" "Starting merging stage..."
-    parallel --colsep ':' -j "$jobs" merge_bams {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+    parallel --colsep ':' -j "$jobs" merge_bams {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file" && \
+    log "INFO" "${workdir}" "${run_id}" "Merging completed successfully!"
 
     # 6. MARKING DUPLICATES
     log "INFO" "${workdir}" "${run_id}" "Starting marking duplicates stage..."
-    parallel --colsep ':' -j "$jobs" mark_dupes {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+    parallel --colsep ':' -j "$jobs" mark_dupes {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file" && \
+    log "INFO" "${workdir}" "${run_id}" "Marking duplicates completed successfully!"
 
     # 7. SPLITTING READS
     log "INFO" "${workdir}" "${run_id}" "Starting splitting reads stage..."
-    parallel --colsep ':' -j "$jobs" split_reads {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+    parallel --colsep ':' -j "$jobs" split_reads {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file" && \
+    log "INFO" "${workdir}" "${run_id}" "Splitting reads completed successfully!"
 
     # 8. BASE QUALITY SCORE RECALIBRATION (first pass) - model creation
     log "INFO" "${workdir}" "${run_id}" "Starting BQSR model creation stage..."
-    parallel --colsep ':' -j "$jobs" model_bqsr {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+    parallel --colsep ':' -j "$jobs" model_bqsr {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file" && \
+    log "INFO" "${workdir}" "${run_id}" "BQSR model creation completed successfully!"
 
     # 9. BASE QUALITY SCORE RECALIBRATION (second pass) - apply recalibration
     log "INFO" "${workdir}" "${run_id}" "Starting BQSR application stage..."
-    parallel --colsep ':' -j "$jobs" apply_bqsr {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
+    parallel --colsep ':' -j "$jobs" apply_bqsr {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file" && \
+    log "INFO" "${workdir}" "${run_id}" "BQSR application completed successfully!"
 
     # 10. HAPLOTYPE CALLING
     log "INFO" "${workdir}" "${run_id}" "Starting haplotype calling stage..."
-    parallel --colsep ':' -j "$jobs" call_haps {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file"
-    
-    log "INFO" "${workdir}" "${run_id}" "Pipeline completed successfully!"
+    parallel --colsep ':' -j "$jobs" call_haps {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file" && \
+    log "INFO" "${workdir}" "${run_id}" "Haplotype calling completed successfully!"
+
+
+    log "INFO" "${workdir}" "${run_id}" "Pipeline has finished without errors at $(date +"%Y-%m-%d %H:%M:%S"). Please check logs for more details."
 }
 
 # Export functions for parallel execution
