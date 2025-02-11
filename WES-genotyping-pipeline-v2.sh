@@ -27,7 +27,7 @@ JOBS=2
 RUN_ID=$(uuidgen | cut -d'-' -f1)
 READ_DATATYPE="TUM"
 S3_LOC="s3://crm.sequencing.raw.data.sharing/batch1/SLX"
-S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-TUM-iter4"
+S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-TUM-iter5"
 
 # Parse command line arguments
 while getopts "hdo:j:r:" opt; do
