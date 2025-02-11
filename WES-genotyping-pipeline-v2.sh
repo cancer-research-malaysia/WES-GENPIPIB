@@ -79,7 +79,8 @@ init_directories() {
 
     if [ "$dry_run" = false ]; then
         # Create base directories
-        mkdir -p "${workdir}/{logs,flagfiles}"
+        mkdir -p "${workdir}/logs"
+        mkdir -p "${workdir}/flagfiles"
 
         # Check if this is a rerun by looking at log file
         if [ -f "${workdir}/logs/${run_id}-WES-pipeline.log" ]; then
