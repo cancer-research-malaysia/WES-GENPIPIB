@@ -340,47 +340,6 @@ add_readgroups () {
     
 }
 
-list_bams_old() {
-    local tum_id=$1
-    local dry_run=$2
-    local run_id=$3
-    local outdir=$4
-    local workdir=$5
-    local s3_dest=$6
-    
-    if [ "$dry_run" = true ]; then
-        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create ${tum_id} bamlist"
-        return 0
-    fi
-    
-    if ! check_checkpoint "map" "${prefix}_${tum_id}" "${workdir}" "$dry_run"; then
-        log "ERROR" "Cannot proceed with bamlisting - mapping not completed for ${prefix}_${tum_id}"
-        return 1
-    fi
-
-    if check_checkpoint "listbams" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
-        log "INFO" "${workdir}" "${run_id}" "Skipping listing bams for ${tum_id} - already completed"
-        return 0
-    fi
-
-    log "INFO" "${workdir}" "${run_id}" "Listing BAM files for sample ${tum_id}..."
-
-    # create bamlist directory
-    mkdir -p "${workdir}/logs/4_list_bams"
-    
-    local bam_list="${workdir}/logs/4_list_bams/${run_id}--${tum_id}_bams.list"
-    
-    aws s3 ls "${s3_dest}/${tum_id}/3_rg_added_bams/" | \
-        grep "sorted.RG-added.bam$" | \
-        awk '{print $NF}' | \
-        while read -r l; do 
-            echo "$l"
-        done > "$bam_list"
-    
-    create_checkpoint "listbams" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
-    mark_failure "listbams" "${tum_id}" "${workdir}" "${dry_run}" "Listing bams failed for sample ${tum_id}" "${run_id}"
-}
-
 list_bams() {
     local tum_id=$1
     local dry_run=$2
