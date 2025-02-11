@@ -25,6 +25,7 @@ OUTPUT_DIR=$(dirname "$0")
 WORKING_DIR=$(pwd)
 JOBS=2
 RUN_ID=$(uuidgen | cut -d'-' -f1)
+READ_DATATYPE="TUM"
 S3_LOC="s3://crm.sequencing.raw.data.sharing/batch1/SLX"
 S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-TUM-iter4"
 
@@ -58,11 +59,24 @@ init_directories() {
 
     if [ "$dry_run" = false ]; then
         # Create base directories
-        mkdir -p "${workdir}"/{logs,flagfiles}
+        mkdir -p "${workdir}/logs"
         # Create run-specific directories
         mkdir -p "${workdir}/flagfiles/${run_id}"
-        touch "${workdir}/logs/${run_id}-WES-pipeline.log"  # Ensure log file exists
-        log "INFO" "${workdir}" "${run_id}" "Created directory structure for run ${run_id}"
+
+        # Check if this is a rerun by looking at log file
+        if [ -f "${workdir}/logs/${run_id}-WES-pipeline.log" ]; then
+            # Add clear separator for rerun
+            echo -e "\n\n" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
+            echo "=====================================================" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
+            echo "RERUNNING PIPELINE WITH RUN ID: ${run_id}" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
+            echo "RERUN STARTED AT: $(date '+%Y-%m-%d %H:%M:%S')" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
+            echo "=====================================================" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
+            echo -e "\n" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
+            log "INFO" "${workdir}" "${run_id}" "Restarting..."
+        else
+            # First time run - just create the file
+            touch "${workdir}/logs/${run_id}-WES-pipeline.log"
+        fi
     else
         log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create directory structure for run ${run_id}"
     fi
@@ -85,7 +99,7 @@ log() {
     # Output colored version to terminal
     echo -e "${color}${log_message}\033[0m" >&2
     # Output non-colored version to log file
-    echo "${log_message}" > "${workdir}/logs/${run_id}-WES-pipeline.log"
+    echo "${log_message}" >> "${workdir}/logs/${run_id}-WES-pipeline.log"
 }
 
 # Checkpoint management functions
@@ -185,13 +199,6 @@ trim_reads() {
     local s3_loc=$8
     local s3_dest=$9
     
-    if check_checkpoint "trim" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
-        log "INFO" "${workdir}" "${run_id}" "Skipping trimming for ${prefix} - already completed"
-        return 0
-    fi
-
-    log "INFO" "${workdir}" "${run_id}" "Trimming FASTQ files for SLX-${prefix} of sample ${tum_id}..."
-
     if [ "$dry_run" = true ]; then
         log "INFO" "${workdir}" "${run_id}" "DRY-RUN mode enabled!"
         aws s3 cp --dryrun "${s3_loc}-${slx_id}/${prefix}.r_1.fq.gz" "${outdir}/"
@@ -199,20 +206,33 @@ trim_reads() {
         return 0
     fi
 
+    if check_checkpoint "trim" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "INFO" "${workdir}" "${run_id}" "Skipping trimming for ${prefix} - already completed"
+        return 0
+    fi
+
+    log "INFO" "${workdir}" "${run_id}" "Trimming FASTQ files for SLX-${prefix} of sample ${tum_id}..."
+
+    # create log directory
+    mkdir -p "${workdir}/logs/1_trim_galore_out"
+
     # Download and process
     aws s3 cp "${s3_loc}-${slx_id}/${prefix}.r_1.fq.gz" "${outdir}/" && \
     aws s3 cp "${s3_loc}-${slx_id}/${prefix}.r_2.fq.gz" "${outdir}/" && \
     trim_galore "${outdir}/${prefix}.r_1.fq.gz" "${outdir}/${prefix}.r_2.fq.gz" \
         --paired --gzip -o "${outdir}" -a CTGTCTCTTATACACATCT \
-        2>"${workdir}/logs/${prefix}.trimgalore.log" && \
+        2>"${workdir}/logs/1_trim_galore_out/${prefix}.trimgalore.log" && \
     aws s3 cp "${outdir}/${prefix}.r_1_val_1.fq.gz" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
     aws s3 cp "${outdir}/${prefix}.r_2_val_2.fq.gz" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
+    aws s3 cp "${outdir}/${prefix}.r_1.fq.gz_trimming_report.txt" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
+    aws s3 cp "${outdir}/${prefix}.r_2.fq.gz_trimming_report.txt" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
     create_checkpoint "trim" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "trim" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "TrimGalore failed for SLX-${slx_id} of sample ${tum_id}" "${run_id}"
 
     # Cleanup on success
     if check_checkpoint "trim" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         rm "${outdir}/${prefix}.r_1.fq.gz" "${outdir}/${prefix}.r_2.fq.gz"
+        rm "${outdir}/${prefix}.r_1.fq.gz_trimming_report.txt" "${outdir}/${prefix}.r_2.fq.gz_trimming_report.txt"
         log "INFO" "${workdir}" "${run_id}" "TrimGalore completed successfully for ${prefix}"
     fi
 }
@@ -243,6 +263,9 @@ map_reads() {
     fi
 
     log "INFO" "${workdir}" "${run_id}" "Mapping ${prefix} to reference genome..."
+
+    # create log directory
+    mkdir -p "${workdir}/logs/2_bwa_out"
     
     zcat "${outdir}/${prefix}.r_1_val_1.fq.gz" | \
         awk '(NR%2==0){$0=substr($0,1,75)}{print}' > "${outdir}/${prefix}_${tum_id}.r_1_bwa_in.fq" && \
@@ -251,7 +274,7 @@ map_reads() {
     bwa mem -M -t 4 refs/GRCh38-109_bwa_db \
         "${outdir}/${prefix}_${tum_id}.r_1_bwa_in.fq" \
         "${outdir}/${prefix}_${tum_id}.r_2_bwa_in.fq" \
-        2>"${workdir}/logs/${prefix}.bwa.log" | \
+        2>"${workdir}/logs/2_bwa_out/${prefix}.bwa.log" | \
     samtools view --threads 8 -b - | \
     samtools sort --threads 8 > "${outdir}/${prefix}_${tum_id}.sorted.bam" && \
     aws s3 cp "${outdir}/${prefix}_${tum_id}.sorted.bam" "${s3_dest}/${tum_id}/2_bwa_out/" && \
@@ -275,6 +298,7 @@ add_readgroups () {
     local outdir=$6
     local workdir=$7
     local s3_dest=$8
+    local read_datatype=$9
 
     if [ "$dry_run" = true ]; then
         log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would add read groups for file {$prefix} of sample ${tum_id}"
@@ -293,6 +317,9 @@ add_readgroups () {
 
     log "INFO" "${workdir}" "${run_id}" "Adding read groups for file {$prefix} of sample ${tum_id}..."
 
+    # create log directory
+    mkdir -p "${workdir}/logs/3_rg_added_bams"
+
     gatk AddOrReplaceReadGroups \
     -I "${outdir}/${prefix}_${tum_id}.sorted.bam" \
     -O "${outdir}/${prefix}_${tum_id}.sorted.RG-added.bam" \
@@ -300,7 +327,7 @@ add_readgroups () {
     --RGLB $(echo "${prefix}" | cut -d '.' -f 1,2) \
     --RGPL Illumina \
     --RGPU "SLX-${slx_id}.${tum_id}" \
-    --RGSM "${tum_id}_TUM" && \
+    --RGSM "${tum_id}_${read_datatype}" &>"${workdir}/logs/3_rg_added_bams/${prefix}.RG_added.log" && \
     aws s3 cp "${outdir}/${prefix}_${tum_id}.sorted.RG-added.bam" "${s3_dest}/${tum_id}/3_rg_added_bams/" && \
     create_checkpoint "addrg" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "addrg" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "Adding read groups failed for sample ${tum_id}" "${run_id}"
@@ -313,7 +340,7 @@ add_readgroups () {
     
 }
 
-list_bams() {
+list_bams_old() {
     local tum_id=$1
     local dry_run=$2
     local run_id=$3
@@ -326,10 +353,10 @@ list_bams() {
         return 0
     fi
     
-    # if ! check_checkpoint "map" "${prefix}_${tum_id}" "${workdir}" "$dry_run"; then
-    #     log "ERROR" "Cannot proceed with bamlisting - mapping not completed for ${prefix}_${tum_id}"
-    #     return 1
-    # fi
+    if ! check_checkpoint "map" "${prefix}_${tum_id}" "${workdir}" "$dry_run"; then
+        log "ERROR" "Cannot proceed with bamlisting - mapping not completed for ${prefix}_${tum_id}"
+        return 1
+    fi
 
     if check_checkpoint "listbams" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         log "INFO" "${workdir}" "${run_id}" "Skipping listing bams for ${tum_id} - already completed"
@@ -337,15 +364,75 @@ list_bams() {
     fi
 
     log "INFO" "${workdir}" "${run_id}" "Listing BAM files for sample ${tum_id}..."
+
+    # create bamlist directory
+    mkdir -p "${workdir}/logs/4_list_bams"
     
-    local bam_list="${workdir}/manifests/${tum_id}_bams.list"
+    local bam_list="${workdir}/logs/4_list_bams/${run_id}--${tum_id}_bams.list"
     
     aws s3 ls "${s3_dest}/${tum_id}/3_rg_added_bams/" | \
         grep "sorted.RG-added.bam$" | \
         awk '{print $NF}' | \
         while read -r l; do 
-            echo "-I $l"
-        done >> "$bam_list"
+            echo "$l"
+        done > "$bam_list"
+    
+    create_checkpoint "listbams" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
+    mark_failure "listbams" "${tum_id}" "${workdir}" "${dry_run}" "Listing bams failed for sample ${tum_id}" "${run_id}"
+}
+
+list_bams() {
+    local tum_id=$1
+    local dry_run=$2
+    local run_id=$3
+    local outdir=$4
+    local workdir=$5
+    local s3_dest=$6
+    local s3_mapping_file="${workdir}/manifests/${run_id}--data-s3-mapping.txt"
+    
+    if [ "$dry_run" = true ]; then
+        log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would create ${tum_id} bamlist"
+        return 0
+    fi
+
+    # First check if we've already completed this step for this tumor ID
+    if check_checkpoint "listbams" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        log "INFO" "${workdir}" "${run_id}" "Skipping listing bams for ${tum_id} - already completed"
+        return 0
+    fi
+    
+    # Get all file prefixes for this tumor ID and verify their checkpoints
+    # set ALLFILES_DONE boolean
+    local ALLFILES_DONE=true
+    while IFS=':' read -r slx_id prefix tumor_id; do
+        if [ "${tumor_id}" = "${tum_id}" ]; then
+            if ! check_checkpoint "addrg" "${prefix}_${tumor_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+                log "ERROR" "${workdir}" "${run_id}" "Cannot proceed with bamlisting - mapping not completed for ${prefix}_${tumor_id}"
+                ALLFILES_DONE=false
+                break
+            fi
+        fi
+    done < "${s3_mapping_file}"
+    
+    if [ "${ALLFILES_DONE}" = false ]; then
+        return 1
+    else
+        log "INFO" "${workdir}" "${run_id}" "All fastq files corresponding to sample ${tum_id} have been processed."
+    fi
+
+    log "INFO" "${workdir}" "${run_id}" "Listing BAM files for sample ${tum_id}..."
+
+    # create bamlist directory
+    mkdir -p "${workdir}/logs/4_list_bams"
+    
+    local bam_list="${workdir}/logs/4_list_bams/${run_id}--${tum_id}_bams.list"
+    
+    aws s3 ls "${s3_dest}/${tum_id}/3_rg_added_bams/" | \
+        grep "sorted.RG-added.bam$" | \
+        awk '{print $NF}' | \
+        while read -r l; do 
+            echo "$l"
+        done > "$bam_list"
     
     create_checkpoint "listbams" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "listbams" "${tum_id}" "${workdir}" "${dry_run}" "Listing bams failed for sample ${tum_id}" "${run_id}"
@@ -645,6 +732,7 @@ main() {
     local run_id=$6
     local s3_loc=$7
     local s3_dest=$8
+    local read_datatype=$9
 
     local s3_mapping_file="${workdir}/manifests/${run_id}--data-s3-mapping.txt"
     local s3_tum_id_file="${workdir}/manifests/${run_id}--data-s3-tum-ids.txt"
@@ -678,7 +766,7 @@ main() {
 
     # 3. ADDING READGROUPS
     log "INFO" "${workdir}" "${run_id}" "Starting readgroup addition stage..."
-    parallel --colsep ':' -j "$jobs" add_readgroups {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_mapping_file" && \
+    parallel --colsep ':' -j "$jobs" add_readgroups {1} {2} {3} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" "${read_datatype}" :::: "$s3_mapping_file" && \
     log "INFO" "${workdir}" "${run_id}" "Readgroup addition completed successfully!"
 
     # 4. LISTING BAMS
@@ -747,8 +835,9 @@ log "INFO" "${WORKING_DIR}" "${RUN_ID}" "Current RUN ID is: ${RUN_ID}"
 # check for flagfile run-id directory to see if it was a previous run
 if [ -d "${WORKING_DIR}/flagfiles/${RUN_ID}" ]; then
     log "INFO" "${WORKING_DIR}" "${RUN_ID}" "Found previous run with same RUN ID. This will be treated as a re-run/resume."
-    # retouch mapping file to avoid redundant appending
-    touch "${WORKING_DIR}/manifests/${RUN_ID}--data-s3-mapping.txt"
+    # empty mapping file to avoid redundant appending
+    : > "${WORKING_DIR}/manifests/${RUN_ID}--data-s3-mapping.txt"
+
 fi
 
 # run the main function
