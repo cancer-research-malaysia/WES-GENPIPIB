@@ -221,7 +221,7 @@ trim_reads() {
     aws s3 cp "${s3_loc}-${slx_id}/${prefix}.r_2.fq.gz" "${outdir}/" && \
     trim_galore "${outdir}/${prefix}.r_1.fq.gz" "${outdir}/${prefix}.r_2.fq.gz" \
         --paired --gzip -o "${outdir}" -a CTGTCTCTTATACACATCT \
-        2>"${workdir}/logs/1_trim_galore_out/${prefix}.trimgalore.log" && \
+        2>"${workdir}/logs/1_trim_galore_out/${run_id}--${prefix}_${tum_id}.trimgalore.log" && \
     aws s3 cp "${outdir}/${prefix}.r_1_val_1.fq.gz" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
     aws s3 cp "${outdir}/${prefix}.r_2_val_2.fq.gz" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
     aws s3 cp "${outdir}/${prefix}.r_1.fq.gz_trimming_report.txt" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
@@ -274,7 +274,7 @@ map_reads() {
     bwa mem -M -t 4 refs/GRCh38-109_bwa_db \
         "${outdir}/${prefix}_${tum_id}.r_1_bwa_in.fq" \
         "${outdir}/${prefix}_${tum_id}.r_2_bwa_in.fq" \
-        2>"${workdir}/logs/2_bwa_out/${prefix}.bwa.log" | \
+        2>"${workdir}/logs/2_bwa_out/${run_id}--${prefix}_${tum_id}.bwa.log" | \
     samtools view --threads 8 -b - | \
     samtools sort --threads 8 > "${outdir}/${prefix}_${tum_id}.sorted.bam" && \
     aws s3 cp "${outdir}/${prefix}_${tum_id}.sorted.bam" "${s3_dest}/${tum_id}/2_bwa_out/" && \
@@ -327,7 +327,7 @@ add_readgroups () {
     --RGLB $(echo "${prefix}" | cut -d '.' -f 1,2) \
     --RGPL Illumina \
     --RGPU "SLX-${slx_id}.${tum_id}" \
-    --RGSM "${tum_id}_${read_datatype}" &>"${workdir}/logs/3_rg_added_bams/${prefix}.RG_added.log" && \
+    --RGSM "${tum_id}_${read_datatype}" 2>"${workdir}/logs/3_rg_added_bams/${run_id}--${prefix}_${tum_id}.RG_added.log" && \
     aws s3 cp "${outdir}/${prefix}_${tum_id}.sorted.RG-added.bam" "${s3_dest}/${tum_id}/3_rg_added_bams/" && \
     create_checkpoint "addrg" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "addrg" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "Adding read groups failed for sample ${tum_id}" "${run_id}"
@@ -391,7 +391,7 @@ list_bams() {
         awk '{print $NF}' | \
         while read -r l; do 
             echo "$l"
-        done > "$bam_list"
+        done > "$bam_list" && \
     
     create_checkpoint "listbams" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "listbams" "${tum_id}" "${workdir}" "${dry_run}" "Listing bams failed for sample ${tum_id}" "${run_id}"
@@ -404,6 +404,8 @@ merge_bams() {
     local outdir=$4
     local workdir=$5
     local s3_dest=$6
+
+    local bam_list="${workdir}/logs/4_list_bams/${run_id}--${tum_id}_bams.list"
 
     if [ "$dry_run" = true ]; then
         log "INFO" "${workdir}" "${run_id}" "DRY-RUN: Would merge BAMs for sample ${tum_id}"
@@ -421,16 +423,19 @@ merge_bams() {
     fi
 
     # check if bam list contains at least 1 line
-    if [ ! -f "${workdir}/manifests/${tum_id}_bams.list" ] || [ $(wc -l < "${workdir}/manifests/${tum_id}_bams.list") -eq 0 ]; then
+    if [ ! -f "${bam_list}" ] || [ $(wc -l < "${bam_list}") -eq 0 ]; then
         log "ERROR" "${workdir}" "${run_id}" "No BAM files found for sample ${tum_id}"
         return 1
     fi
 
     log "INFO" "${workdir}" "${run_id}" "Merging BAM files for sample ${tum_id}..."
 
+    # create log directory
+    mkdir -p "${workdir}/logs/5_merged_bams"
+
     gatk MergeSamFiles --USE_THREADING true \
         --arguments_file "${workdir}/manifests/${tum_id}_bams.list" \
-        -O "${outdir}/${tum_id}.sorted.RG-added.merged.bam" && \
+        -O "${outdir}/${tum_id}.sorted.RG-added.merged.bam" 2>"${workdir}/logs/5_merged_bams/${run-id}--${tum_id}.merge-bam.log" && \
     samtools index "${outdir}/${tum_id}.sorted.RG-added.merged.bam" "${outdir}/${tum_id}.sorted.RG-added.merged.bai" && \
     aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.bam" "${s3_dest}/${tum_id}/4_merged_bams/" && \
     aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.bai" "${s3_dest}/${tum_id}/4_merged_bams/" && \
@@ -471,12 +476,15 @@ mark_dupes() {
 
     log "INFO" "${workdir}" "${run_id}" "Marking duplicates for sample ${tum_id} BAM..."
 
+    # create log directory
+    mkdir -p "${workdir}/logs/6_dedupped_bams"
+
     gatk MarkDuplicates \
     -I "${outdir}/${tum_id}.sorted.RG-added.merged.bam" \
     -O "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.bam" \
     -M "${outdir}/${tum_id}.normal.MarkDup.metrics" \
     --CREATE_INDEX true \
-    --VALIDATION_STRINGENCY SILENT && \ 
+    --VALIDATION_STRINGENCY SILENT 2>"${workdir}/logs/6_dedupped_bams/${run_id}--${tum_id}-markduplicates-bam.log" && \ 
     aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.bam" "${s3_dest}/${tum_id}/5_dedupped_bams/" && \
     aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.bai" "${s3_dest}/${tum_id}/5_dedupped_bams/" && \ 
     aws s3 cp "${outdir}/${tum_id}.normal.MarkDup.metrics" "${s3_dest}/${tum_id}/5_dedupped_bams/" && \
@@ -518,16 +526,17 @@ split_reads() {
 
     log "INFO" "${workdir}" "${run_id}" "Splitting reads for sample ${tum_id} BAM..."
 
-    mkdir -p "${workdir}/tmp"
+    # create directories
+    mkdir -p "${workdir}/logs/7_split_reads"
+    mkdir -p "${workdir}/${tum_id}_split-reads-tmp"
 
     gatk SplitNCigarReads \
     -I "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.bam" \
     -O "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.split.bam" \
     -R refs/GRCh38.109.fa \
-    --tmp-dir "${workdir}/tmp" && \
+    --tmp-dir "${workdir}/${tum_id}_split-reads-tmp" 2>"${workdir}/logs/7_split_reads/${run_id}--${tum_id}-splitNcigarReads.log"  && \
     aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.split.bam" "${s3_dest}/${tum_id}/6_split_bams/" && \
-    aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.split.bai" "${s3_dest}/${tum_id}/6_split_bams/"
-
+    aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.split.bai" "${s3_dest}/${tum_id}/6_split_bams/" && \
     create_checkpoint "splitreads" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "splitreads" "${tum_id}" "${workdir}" "${dry_run}" "Splitting reads failed for sample ${tum_id}" "${run_id}"
 
@@ -535,6 +544,7 @@ split_reads() {
     if check_checkpoint "splitreads" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         # remove associated dedupped bams
         rm "${outdir}/*${tum_id}.sorted.RG-added.merged.dedup.ba?"
+        rm -rf "${workdir}/${tum_id}_split-reads-tmp"
         log "INFO" "${workdir}" "${run_id}" "Splitting reads completed successfully for ${tum_id}"
     fi
 }
@@ -565,20 +575,28 @@ model_bqsr() {
 
     log "INFO" "${workdir}" "${run_id}" "Creating BQSR model for sample ${tum_id} BAM..."
 
-    mkdir -p "${workdir}/tmp"
+    # create directories
+    mkdir -p "${workdir}/logs/8_model_BQSR"
+    mkdir -p "${workdir}/${tum_id}_model-bqsr-tmp"
 
     gatk BaseRecalibrator \
     -I "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.split.bam" \
     -O "${outdir}/${tum_id}.recal_data.grp" \
     -R refs/GRCh38.109.fa \
-    --tmp-dir "${workdir}/tmp" \
+    --tmp-dir "${workdir}/${tum_id}_model-bqsr-tmp" \
     --known-sites refs/Homo_sapiens_assembly38.known_indels.renamed.vcf \
     --known-sites refs/Homo_sapiens_assembly38.dbsnp138.renamed.vcf \
-    --known-sites refs/Mills_and_1000G_gold_standard.indels.hg38.renamed.vcf && \
-    aws s3 cp "${outdir}/${tum_id}.recal_data.grp" "${s3_dest}/${tum_id}/7_recal_models/"
-    
+    --known-sites refs/Mills_and_1000G_gold_standard.indels.hg38.renamed.vcf 2>"${workdir}/logs/8_model_BQSR/${run_id}--${tum_id}_model-bqsr.log" && \
+    aws s3 cp "${outdir}/${tum_id}.recal_data.grp" "${s3_dest}/${tum_id}/7_bqsr_models/" && \
     create_checkpoint "modelbqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "modelbqsr" "${tum_id}" "${workdir}" "${dry_run}" "Creating recalibration model failed for sample ${tum_id}" "${run_id}"
+
+    # clean up
+    if check_checkpoint "modelbqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
+        # remove tmp
+        rm -rf "${workdir}/${tum_id}_model-bqsr-tmp"
+        log "INFO" "${workdir}" "${run_id}" "Creating recalibration model completed successfully for ${tum_id}"
+    fi
 }
 
 # Base Quality Score Recalibration function - second pass (adjust recalibration score)
@@ -607,16 +625,18 @@ apply_bqsr() {
 
     log "INFO" "${workdir}" "${run_id}" "Applying BQSR for sample ${tum_id} BAM..."
 
-    mkdir -p "${workdir}/tmp"
+    # create directories
+    mkdir -p "${workdir}/logs/9_apply_BQSR"
+    mkdir -p "${workdir}/${tum_id}_apply-bqsr-tmp"
 
     gatk ApplyBQSR \
     -I "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.split.bam" \
     -O "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.recal.bam" \
     -R refs/GRCh38.109.fa \
     -bqsr "${outdir}/${tum_id}.recal_data.grp" \
-    --tmp-dir "${workdir}/tmp" && \
+    --tmp-dir "${workdir}/${tum_id}_apply-bqsr-tmp" 2>"${workdir}/logs/9_apply_BQSR/${run_id}--${tum_id}_apply-bqsr.log" && \
     aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.recal.bam" "${s3_dest}/${tum_id}/8_recal_bams/" && \
-    aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.recal.bai" "${s3_dest}/${tum_id}/8_recal_bams/"
+    aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.recal.bai" "${s3_dest}/${tum_id}/8_recal_bams/" && \
 
     create_checkpoint "applybqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "applybqsr" "${tum_id}" "${workdir}" "${dry_run}" "Applying recalibration failed for sample ${tum_id}" "${run_id}"
@@ -624,7 +644,8 @@ apply_bqsr() {
     # Cleanup on success
     if check_checkpoint "applybqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         # remove associated recal bams
-        rm "${outdir}/*${tum_id}.sorted.RG-added.merged.dedup.split.ba?" "${outdir}/*${tum_id}.recal_data.grp" 
+        rm "${outdir}/*${tum_id}.sorted.RG-added.merged.dedup.split.ba?" "${outdir}/*${tum_id}.recal_data.grp"
+        rm -rf "${workdir}/${tum_id}_apply-bqsr-tmp"
         log "INFO" "${workdir}" "${run_id}" "Applying recalibration completed successfully for ${tum_id}"
     fi
 }
@@ -655,19 +676,20 @@ call_haps() {
 
     log "INFO" "${workdir}" "${run_id}" "Calling haplotypes for sample ${tum_id} BAM..."
 
-    mkdir -p "${workdir}/tmp"
+    # create directories
+    mkdir -p "${workdir}/logs/10_call_haps"
+    mkdir -p "${workdir}/${tum_id}_call-haps-tmp"
 
     gatk HaplotypeCaller \
     -R refs/GRCh38.109.fa \
     -I "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.recal.bam" \
     -O "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf.gz" \
-    --tmp-dir "${workdir}/tmp" \
-    --dont-use-soft-clipped-bases \
-    2>"${workdir}/logs/${tum_id}.gatk4.all.germline.haps.vcf.gz.log" && \
+    --tmp-dir "${workdir}/${tum_id}_call-haps-tmp" \
+    --dont-use-soft-clipped-bases 2>"${workdir}/logs/10_call_haps/${run_id}--${tum_id}.gatk4.all.germline.haps.vcf.gz.log" && \
     gzip -dk "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf.gz" && \
-    aws s3 cp "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf.gz" "${s3_dest}/${tum_id}/9_germline_haps_vcfs/" && \
-    aws s3 cp "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf.gz.log" "${s3_dest}/${tum_id}/9_germline_haps_vcfs/" && \
-    aws s3 cp "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf" "${s3_dest}/${tum_id}/9_germline_haps_vcfs/"
+    aws s3 cp "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf.gz" "${s3_dest}/${tum_id}/9_call_germline_haps_vcfs/" && \
+    aws s3 cp "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf.gz.log" "${s3_dest}/${tum_id}/9_call_germline_haps_vcfs/" && \
+    aws s3 cp "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf" "${s3_dest}/${tum_id}/9_call_germline_haps_vcfs/" && \
 
     create_checkpoint "callhaps" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "callhaps" "${tum_id}" "${workdir}" "${dry_run}" "Haplotype calling failed for sample ${tum_id}" "${run_id}"
@@ -677,6 +699,7 @@ call_haps() {
         # remove associated recal bams
         rm "${outdir}/*${tum_id}.sorted.RG-added.merged.dedup.recal.ba?"
         rm "${outdir}/*${tum_id}.gatk4.all.germline.haps.vcf.gz" "${outdir}/*${tum_id}.gatk4.all.germline.haps.vcf"
+        rm -rf "${workdir}/${tum_id}_call-haps-tmp"
         log "INFO" "${workdir}" "${run_id}" "Haplotype calling completed successfully for ${tum_id}"
     fi
 }
@@ -800,5 +823,5 @@ if [ -d "${WORKING_DIR}/flagfiles/${RUN_ID}" ]; then
 fi
 
 # run the main function
-main "$MANIFEST_FILE" "$JOBS" "$WORKING_DIR" "$OUTPUT_DIR" "$DRY_RUN" "$RUN_ID" "$S3_LOC" "$S3_DEST"
+main "$MANIFEST_FILE" "$JOBS" "$WORKING_DIR" "$OUTPUT_DIR" "$DRY_RUN" "$RUN_ID" "$S3_LOC" "$S3_DEST" "$READ_DATATYPE"
 
