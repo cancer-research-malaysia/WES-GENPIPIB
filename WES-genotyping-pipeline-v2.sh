@@ -26,7 +26,7 @@ WORKING_DIR=$(pwd)
 JOBS=2
 RUN_ID=$(uuidgen | cut -d'-' -f1)
 S3_LOC="s3://crm.sequencing.raw.data.sharing/batch1/SLX"
-S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-TUM-iter3"
+S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-TUM-iter4"
 
 # Parse command line arguments
 while getopts "hdo:j:r:" opt; do
@@ -167,7 +167,7 @@ get_s3_files() {
         grep -v 0000 | \
         cut -d '.' -f 1,2,3,4 | \
         sort | uniq | \
-        awk -v tid="$tum_id" -v slx="$slx_id" '{print slx ":" $0 ":" tid}' > "$s3_mapping"
+        awk -v tid="$tum_id" -v slx="$slx_id" '{print slx ":" $0 ":" tid}' >> "$s3_mapping"
         # # debug lines
         # awk -v tid="$tum_id" -v slx="$slx_id" '{print slx ":" $0 ":" tid}' | \
         # tee -a "$s3_mapping"
@@ -730,6 +730,13 @@ export -f \
 init_directories "${WORKING_DIR}" "${DRY_RUN}" "${RUN_ID}"
 log "INFO" "${WORKING_DIR}" "${RUN_ID}" "Initialized directory structure."
 log "INFO" "${WORKING_DIR}" "${RUN_ID}" "Current RUN ID is: ${RUN_ID}"
+
+# check for flagfile run-id directory to see if it was a previous run
+if [ -d "${WORKING_DIR}/flagfiles/${RUN_ID}" ]; then
+    log "INFO" "${WORKING_DIR}" "${RUN_ID}" "Found previous run with same RUN ID. This will be treated as a re-run/resume."
+    # retouch mapping file to avoid redundant appending
+    touch "${WORKING_DIR}/manifests/${RUN_ID}--data-s3-mapping.txt"
+fi
 
 # run the main function
 main "$MANIFEST_FILE" "$JOBS" "$WORKING_DIR" "$OUTPUT_DIR" "$DRY_RUN" "$RUN_ID" "$S3_LOC" "$S3_DEST"
