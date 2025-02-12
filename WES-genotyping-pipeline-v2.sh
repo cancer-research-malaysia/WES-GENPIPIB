@@ -229,12 +229,18 @@ trim_reads() {
     aws s3 cp "${outdir}/${prefix}.r_2.fq.gz_trimming_report.txt" "${s3_dest}/${tum_id}/1_trim_galore_out/" && \
     create_checkpoint "trim" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "trim" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "TrimGalore failed for SLX-${slx_id} of sample ${tum_id}" "${run_id}"
+    
+    if [ $? -ne 0 ]; then
+        log "ERROR" "${workdir}" "${run_id}" "Pipeline failed at trimming stage."
+        return 1
+    fi
 
     # Cleanup on success
     if check_checkpoint "trim" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         rm "${outdir}/${prefix}.r_1.fq.gz" "${outdir}/${prefix}.r_2.fq.gz"
         rm "${outdir}/${prefix}.r_1.fq.gz_trimming_report.txt" "${outdir}/${prefix}.r_2.fq.gz_trimming_report.txt"
         log "INFO" "${workdir}" "${run_id}" "TrimGalore completed successfully for ${prefix}"
+        return 0
     fi
 }
 
@@ -282,11 +288,17 @@ map_reads() {
     create_checkpoint "map" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "map" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "BWA mapping failed for ${prefix}_${tum_id}" "${run_id}"
 
+    if [ $? -ne 0 ]; then
+        log "ERROR" "${workdir}" "${run_id}" "Pipeline failed at mapping stage."
+        return 1
+    fi
+
     # Cleanup on success
     if check_checkpoint "map" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         rm "${outdir}/${prefix}_${tum_id}.r_1_bwa_in.fq" "${outdir}/${prefix}_${tum_id}.r_2_bwa_in.fq"
         rm "${outdir}/${prefix}.r_1_val_1.fq.gz" "${outdir}/${prefix}.r_2_val_2.fq.gz"
         log "INFO" "${workdir}" "${run_id}" "BWA mapping completed successfully for ${prefix}_${tum_id}"
+        return 0
     fi
 }
 
@@ -333,10 +345,16 @@ add_readgroups () {
     create_checkpoint "addrg" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "addrg" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "Adding read groups failed for sample ${tum_id}" "${run_id}"
 
+    if [ $? -ne 0 ]; then
+        log "ERROR" "${workdir}" "${run_id}" "Pipeline failed at read group adding/editing stage."
+        return 1
+    fi
+
     # Cleanup on success
     if check_checkpoint "addrg" "${prefix}_${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         rm "${outdir}/${prefix}_${tum_id}.sorted.bam"
         log "INFO" "${workdir}" "${run_id}" "Read groups added successfully for ${tum_id}"
+        return 0
     fi
     
 }
@@ -396,6 +414,13 @@ list_bams() {
     
     create_checkpoint "listbams" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "listbams" "${tum_id}" "${workdir}" "${dry_run}" "Listing bams failed for sample ${tum_id}" "${run_id}"
+
+    if [ $? -ne 0 ]; then
+        log "ERROR" "${workdir}" "${run_id}" "Pipeline failed at read group adding/editing stage."
+        return 1
+    else
+        return 0
+    fi
 }
 
 merge_bams() {
@@ -435,19 +460,25 @@ merge_bams() {
     mkdir -p "${workdir}/logs/5_merged_bams"
 
     gatk MergeSamFiles --USE_THREADING true \
-        --arguments_file "${workdir}/manifests/${tum_id}_bams.list" \
-        -O "${outdir}/${tum_id}.sorted.RG-added.merged.bam" 2>"${workdir}/logs/5_merged_bams/${run-id}--${tum_id}.merge-bam.log" && \
+        --arguments_file "${bam_list}" \
+        -O "${outdir}/${tum_id}.sorted.RG-added.merged.bam" 2>"${workdir}/logs/5_merged_bams/${run_id}--${tum_id}.merge-bam.log" && \
     samtools index "${outdir}/${tum_id}.sorted.RG-added.merged.bam" "${outdir}/${tum_id}.sorted.RG-added.merged.bai" && \
     aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.bam" "${s3_dest}/${tum_id}/4_merged_bams/" && \
     aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.bai" "${s3_dest}/${tum_id}/4_merged_bams/" && \
     create_checkpoint "merge" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "merge" "${tum_id}" "${workdir}" "${dry_run}" "Merging failed for sample ${tum_id}" "${run_id}"
 
+    if [ $? -ne 0 ]; then
+        log "ERROR" "${workdir}" "${run_id}" "Pipeline failed at merging stage."
+        return 1
+    fi
+
     # Cleanup on success
     if check_checkpoint "merge" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         # remove associated RG-added bams
         rm "${outdir}/*${tum_id}.sorted.RG-added.bam"
         log "INFO" "${workdir}" "${run_id}" "Merging completed successfully for ${tum_id}"
+        return 0
     fi
 }
 
@@ -493,11 +524,17 @@ mark_dupes() {
     create_checkpoint "markdupes" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "markdupes" "${tum_id}" "${workdir}" "${dry_run}" "Marking duplicates failed for sample ${tum_id}" "${run_id}"
 
+    if [ $? -ne 0 ]; then
+        log "ERROR" "${workdir}" "${run_id}" "Pipeline failed at mark duplicates stage."
+        return 1
+    fi
+
     # Cleanup on success
     if check_checkpoint "markdupes" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         # remove associated merged bams
         rm "${outdir}/*${tum_id}.sorted.RG-added.merged.ba?"
         log "INFO" "${workdir}" "${run_id}" "Marking duplicates completed successfully for ${tum_id}"
+        return 0
     fi
 }
 
@@ -541,12 +578,18 @@ split_reads() {
     create_checkpoint "splitreads" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "splitreads" "${tum_id}" "${workdir}" "${dry_run}" "Splitting reads failed for sample ${tum_id}" "${run_id}"
 
+    if [ $? -ne 0 ]; then
+        log "ERROR" "${workdir}" "${run_id}" "Pipeline failed at splitting reads stage."
+        return 1
+    fi
+
     # Cleanup on success
     if check_checkpoint "splitreads" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         # remove associated dedupped bams
         rm "${outdir}/*${tum_id}.sorted.RG-added.merged.dedup.ba?"
         rm -rf "${workdir}/${tum_id}_split-reads-tmp"
         log "INFO" "${workdir}" "${run_id}" "Splitting reads completed successfully for ${tum_id}"
+        return 0
     fi
 }
 
@@ -592,11 +635,17 @@ model_bqsr() {
     create_checkpoint "modelbqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "modelbqsr" "${tum_id}" "${workdir}" "${dry_run}" "Creating recalibration model failed for sample ${tum_id}" "${run_id}"
 
+    if [ $? -ne 0 ]; then
+        log "ERROR" "${workdir}" "${run_id}" "Pipeline failed at BQSR modeling stage."
+        return 1
+    fi
+
     # clean up
     if check_checkpoint "modelbqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         # remove tmp
         rm -rf "${workdir}/${tum_id}_model-bqsr-tmp"
         log "INFO" "${workdir}" "${run_id}" "Creating recalibration model completed successfully for ${tum_id}"
+        return 0
     fi
 }
 
@@ -642,12 +691,18 @@ apply_bqsr() {
     create_checkpoint "applybqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "applybqsr" "${tum_id}" "${workdir}" "${dry_run}" "Applying recalibration failed for sample ${tum_id}" "${run_id}"
 
+    if [ $? -ne 0 ]; then
+        log "ERROR" "${workdir}" "${run_id}" "Pipeline failed at BQSR adjustment stage."
+        return 1
+    fi
+
     # Cleanup on success
     if check_checkpoint "applybqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         # remove associated recal bams
         rm "${outdir}/*${tum_id}.sorted.RG-added.merged.dedup.split.ba?" "${outdir}/*${tum_id}.recal_data.grp"
         rm -rf "${workdir}/${tum_id}_apply-bqsr-tmp"
         log "INFO" "${workdir}" "${run_id}" "Applying recalibration completed successfully for ${tum_id}"
+        return 0
     fi
 }
 
@@ -695,6 +750,11 @@ call_haps() {
     create_checkpoint "callhaps" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "callhaps" "${tum_id}" "${workdir}" "${dry_run}" "Haplotype calling failed for sample ${tum_id}" "${run_id}"
 
+    if [ $? -ne 0 ]; then
+        log "ERROR" "${workdir}" "${run_id}" "Pipeline failed at haplotype calling stage."
+        return 1
+    fi
+
     # Cleanup on success
     if check_checkpoint "callhaps" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         # remove associated recal bams
@@ -702,6 +762,7 @@ call_haps() {
         rm "${outdir}/*${tum_id}.gatk4.all.germline.haps.vcf.gz" "${outdir}/*${tum_id}.gatk4.all.germline.haps.vcf"
         rm -rf "${workdir}/${tum_id}_call-haps-tmp"
         log "INFO" "${workdir}" "${run_id}" "Haplotype calling completed successfully for ${tum_id}"
+        return 0
     fi
 }
 
@@ -786,7 +847,6 @@ main() {
     log "INFO" "${workdir}" "${run_id}" "Starting haplotype calling stage..."
     parallel --colsep ':' -j "$jobs" call_haps {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file" && \
     log "INFO" "${workdir}" "${run_id}" "Haplotype calling completed successfully!"
-
 
     log "INFO" "${workdir}" "${run_id}" "Pipeline has finished without errors at $(date +"%Y-%m-%d %H:%M:%S"). Please check logs for more details."
 }
