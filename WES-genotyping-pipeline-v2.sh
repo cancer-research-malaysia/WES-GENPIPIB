@@ -409,7 +409,7 @@ list_bams() {
         grep "sorted.RG-added.bam$" | \
         awk '{print $NF}' | \
         while read -r l; do 
-            echo "$l"
+            echo \"-I \"\$l
         done > "$bam_list" && \
     
     create_checkpoint "listbams" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
