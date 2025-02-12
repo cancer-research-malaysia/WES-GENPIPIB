@@ -409,7 +409,7 @@ list_bams() {
         grep "sorted.RG-added.bam$" | \
         awk '{print $NF}' | \
         while read -r l; do 
-            echo \"-I \"\$l
+            echo "-I ${tum_id}/$l "
         done > "$bam_list" && \
     
     create_checkpoint "listbams" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
@@ -848,7 +848,14 @@ main() {
     parallel --colsep ':' -j "$jobs" call_haps {1} "${dry_run}" "${run_id}" "${outdir}" "${workdir}" "${s3_dest}" :::: "$s3_tum_id_file" && \
     log "INFO" "${workdir}" "${run_id}" "Haplotype calling completed successfully!"
 
-    log "INFO" "${workdir}" "${run_id}" "Pipeline has finished without errors at $(date +"%Y-%m-%d %H:%M:%S"). Please check logs for more details."
+    if [ $? -ne 0 ]; then
+        log "ERROR" "${workdir}" "${run_id}" "Pipeline has failed at some stage. Check logs for details."
+        return 1
+    else
+        log "INFO" "${workdir}" "${run_id}" "Pipeline has finished without errors at $(date +"%Y-%m-%d %H:%M:%S")."
+        return 0
+    fi
+    
 }
 
 # Export functions for parallel execution
