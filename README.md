@@ -48,7 +48,7 @@ Mills_and_1000G_gold_standard.indels.hg38.renamed.vcf
 
 > gatk CreateSequenceDictionary -R ref.fa
 
-* Finally, the three `vcf` files are annotation files that would be used during BQSR application and haplotype calling steps. They can be downloaded off this repo.
+* Finally, the three `vcf` files are annotation files that would be used during BQSR application and haplotype calling steps. They can be downloaded elsewhere on the Internet.
 
 ## Usage
 To execute the workflow, just run the following Bash script.

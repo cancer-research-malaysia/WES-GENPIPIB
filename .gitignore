@@ -175,3 +175,4 @@ data-holding-bay/*
 flagfiles/*
 logs/*
 tmp/*
+*-tmp/*
