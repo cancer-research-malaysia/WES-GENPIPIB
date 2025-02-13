@@ -79,11 +79,11 @@ To execute the workflow, just execute the main script in the repo after cloning 
 Using `mamba run` persists the mamba environments into subshells so the internal commands in the script can find the installed tools.
 
 ```
-mamba run -n gatk ./WES-GENOTYPING-CRMY.sh -o /absolute/path/to/output/dir -d -j 4 /home/ubuntu/repos/WES-SNV-discovery-workflow/manifests/WES-TUM-preprocessing-manifest.txt
+mamba run -n gatk ./WES-GENPIPIB.sh -o /absolute/path/to/output/dir -d -j 4 /home/ubuntu/repos/WES-SNV-discovery-workflow/manifests/WES-TUM-preprocessing-manifest.txt
 ```
 `-d` here stands for `--dry-run` while the option `-j` specifies the number of parallel jobs you would like GNU Parallel to run for each stage of the pipeline. 
 
-Other options can be grokked at by running `mamba run -n gatk ./WES-GENOTYPING-CRMY.sh -h`, which would return a help message.
+Other options can be grokked at by running `mamba run -n gatk ./WES-GENPIPIB.sh -h`, which would return a help message.
 
 
 ## Workflow Overview
