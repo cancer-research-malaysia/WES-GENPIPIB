@@ -1,6 +1,6 @@
 # WES Genotyping Pipeline Purely in Bash (WES-GENPIPIB)
 
-This repository contains a workflow used in-house for discovering single nucleotide variants (SNVs) from whole exome sequencing (WES) data.
+This repository contains a workflow used in-house for calling germline haplotypes from whole exome sequencing (WES) data. These steps are the precursor to other downstream analyses such as SNV calling.
 
 ## Table of Contents
 - [Introduction](#introduction)
