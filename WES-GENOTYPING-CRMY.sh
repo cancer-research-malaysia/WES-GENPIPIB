@@ -21,22 +21,25 @@ EOF
 
 # Initialize variables
 DRY_RUN=false
-OUTPUT_DIR=$(dirname "$0")
+OUTPUT_DIR=$(pwd)
 WORKING_DIR=$(pwd)
 JOBS=2
 RUN_ID=$(uuidgen | cut -d'-' -f1)
-READ_DATATYPE="TUM"
+READ_DATATYPE="DEF"
+############## CHANGE THESE IF NEEDED BEFORE RUNNING ##############################
 S3_LOC="s3://crm.sequencing.raw.data.sharing/batch1/SLX"
-S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-TUM"
+S3_DEST="s3://crm.tumorstudy.analysis/suffian/WES.genotyping.outputs/WES-${READ_DATATYPE}"
+##################################################################################
 
 # Parse command line arguments
-while getopts "hdo:j:r:" opt; do
+while getopts "hdo:j:r:t:" opt; do
     case $opt in
         h) usage ;;
         d) DRY_RUN=true ;;
         o) OUTPUT_DIR="$OPTARG" ;;
         j) JOBS="$OPTARG" ;;
         r) RUN_ID="$OPTARG" ;;
+        t) READ_DATATYPE="$OPTARG" ;;
         \?) usage ;;
     esac
 done
@@ -76,11 +79,13 @@ init_directories() {
     local workdir=$1
     local dry_run=$2
     local run_id=$3
+    local outdir=$4
 
     if [ "$dry_run" = false ]; then
         # Create base directories
         mkdir -p "${workdir}/logs"
         mkdir -p "${workdir}/flagfiles"
+        mkdir -p "${outdir}"
 
         # Check if this is a rerun by looking at log file
         if [ -f "${workdir}/logs/${run_id}-WES-pipeline.log" ]; then
@@ -476,7 +481,7 @@ merge_bams() {
     # Cleanup on success
     if check_checkpoint "merge" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         # remove associated RG-added bams
-        rm "${outdir}/*${tum_id}.sorted.RG-added.bam"
+        rm "${outdir}/${tum_id}.sorted.RG-added.bam"
         log "INFO" "${workdir}" "${run_id}" "Merging completed successfully for ${tum_id}"
         return 0
     fi
@@ -514,7 +519,7 @@ mark_dupes() {
     gatk MarkDuplicates \
     -I "${outdir}/${tum_id}.sorted.RG-added.merged.bam" \
     -O "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.bam" \
-    -M "${outdir}/${tum_id}.normal.MarkDup.metrics" \
+    -M "${outdir}/${tum_id}.MarkDup.metrics" \
     --CREATE_INDEX true \
     --VALIDATION_STRINGENCY SILENT 2>"${workdir}/logs/6_dedupped_bams/${run_id}--${tum_id}-markduplicates-bam.log" && \ 
     aws s3 cp "${outdir}/${tum_id}.sorted.RG-added.merged.dedup.bam" "${s3_dest}/${tum_id}/5_dedupped_bams/" && \
@@ -532,7 +537,7 @@ mark_dupes() {
     # Cleanup on success
     if check_checkpoint "markdupes" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         # remove associated merged bams
-        rm "${outdir}/*${tum_id}.sorted.RG-added.merged.ba?"
+        rm ${outdir}/${tum_id}.sorted.RG-added.merged.ba?
         log "INFO" "${workdir}" "${run_id}" "Marking duplicates completed successfully for ${tum_id}"
         return 0
     fi
@@ -586,7 +591,7 @@ split_reads() {
     # Cleanup on success
     if check_checkpoint "splitreads" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         # remove associated dedupped bams
-        rm "${outdir}/*${tum_id}.sorted.RG-added.merged.dedup.ba?"
+        rm ${outdir}/*${tum_id}.sorted.RG-added.merged.dedup.ba?
         rm -rf "${workdir}/${tum_id}_split-reads-tmp"
         log "INFO" "${workdir}" "${run_id}" "Splitting reads completed successfully for ${tum_id}"
         return 0
@@ -699,7 +704,8 @@ apply_bqsr() {
     # Cleanup on success
     if check_checkpoint "applybqsr" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         # remove associated recal bams
-        rm "${outdir}/*${tum_id}.sorted.RG-added.merged.dedup.split.ba?" "${outdir}/*${tum_id}.recal_data.grp"
+        rm -rf ${outdir}/${tum_id}.sorted.RG-added.merged.dedup.split.ba? 
+        rm -rf ${outdir}/${tum_id}.recal_data.grp
         rm -rf "${workdir}/${tum_id}_apply-bqsr-tmp"
         log "INFO" "${workdir}" "${run_id}" "Applying recalibration completed successfully for ${tum_id}"
         return 0
@@ -744,9 +750,10 @@ call_haps() {
     --dont-use-soft-clipped-bases 2>"${workdir}/logs/10_call_haps/${run_id}--${tum_id}.gatk4.all.germline.haps.vcf.gz.log" && \
     gzip -dk "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf.gz" && \
     aws s3 cp "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf.gz" "${s3_dest}/${tum_id}/9_call_germline_haps_vcfs/" && \
-    aws s3 cp "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf.gz.log" "${s3_dest}/${tum_id}/9_call_germline_haps_vcfs/" && \
+    aws s3 cp "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf.gz.tbi" "${s3_dest}/${tum_id}/9_call_germline_haps_vcfs/" && \
     aws s3 cp "${outdir}/${tum_id}.gatk4.all.germline.haps.vcf" "${s3_dest}/${tum_id}/9_call_germline_haps_vcfs/" && \
-
+    aws s3 cp "${workdir}/logs/10_call_haps/${run_id}--${tum_id}.gatk4.all.germline.haps.vcf.gz.log" "${s3_dest}/${tum_id}/9_call_germline_haps_vcfs/" && \
+    
     create_checkpoint "callhaps" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}" || \
     mark_failure "callhaps" "${tum_id}" "${workdir}" "${dry_run}" "Haplotype calling failed for sample ${tum_id}" "${run_id}"
 
@@ -758,8 +765,8 @@ call_haps() {
     # Cleanup on success
     if check_checkpoint "callhaps" "${tum_id}" "${workdir}" "${dry_run}" "${run_id}"; then
         # remove associated recal bams
-        rm "${outdir}/*${tum_id}.sorted.RG-added.merged.dedup.recal.ba?"
-        rm "${outdir}/*${tum_id}.gatk4.all.germline.haps.vcf.gz" "${outdir}/*${tum_id}.gatk4.all.germline.haps.vcf"
+        rm ${outdir}/${tum_id}.sorted.RG-added.merged.dedup.*
+        rm ${outdir}/${tum_id}.gatk4.all.germline.haps.vcf*
         rm -rf "${workdir}/${tum_id}_call-haps-tmp"
         log "INFO" "${workdir}" "${run_id}" "Haplotype calling completed successfully for ${tum_id}"
         return 0
@@ -849,7 +856,7 @@ main() {
     log "INFO" "${workdir}" "${run_id}" "Haplotype calling completed successfully!"
 
     if [ $? -ne 0 ]; then
-        log "ERROR" "${workdir}" "${run_id}" "Pipeline has failed at some stage. Check logs for details."
+        log "ERROR" "${workdir}" "${run_id}" "Pipeline has failed at some stage on $(date +"%Y-%m-%d %H:%M:%S"). Check logs for details."
         return 1
     else
         log "INFO" "${workdir}" "${run_id}" "Pipeline has finished without errors at $(date +"%Y-%m-%d %H:%M:%S")."
@@ -877,10 +884,12 @@ export -f \
             apply_bqsr \
             call_haps
 
+# Customize output path
+FINAL_OUTDIR="$OUTPUT_DIR"/"$RUN_ID"
 # Initialize directory structure before any logging occurs
-init_directories "${WORKING_DIR}" "${DRY_RUN}" "${RUN_ID}"
+init_directories "${WORKING_DIR}" "${DRY_RUN}" "${RUN_ID}" "${FINAL_OUTDIR}"
 log "INFO" "${WORKING_DIR}" "${RUN_ID}" "Initialized directory structure."
-log "INFO" "${WORKING_DIR}" "${RUN_ID}" "Current RUN ID is: ${RUN_ID}"
+log "INFO" "${WORKING_DIR}" "${RUN_ID}" "Current RUN ID is: ${RUN_ID} on ${READ_DATATYPE} data"
 
 # check for flagfile run-id directory to see if it was a previous run
 if [ -d "${WORKING_DIR}/flagfiles/${RUN_ID}" ] && [ -n "$(ls -A "${WORKING_DIR}/flagfiles/${RUN_ID}")" ]; then
@@ -894,5 +903,5 @@ else
 fi
 
 # run the main function
-main "$MANIFEST_FILE" "$JOBS" "$WORKING_DIR" "$OUTPUT_DIR" "$DRY_RUN" "$RUN_ID" "$S3_LOC" "$S3_DEST" "$READ_DATATYPE"
+main "$MANIFEST_FILE" "$JOBS" "$WORKING_DIR" "$FINAL_OUTDIR" "$DRY_RUN" "$RUN_ID" "$S3_LOC" "$S3_DEST" "$READ_DATATYPE"
 
